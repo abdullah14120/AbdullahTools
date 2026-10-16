@@ -1,4 +1,4 @@
-#include <QApplication>
+cpp_code = r'''#include <QApplication>
 #include <QMainWindow>
 #include <QWidget>
 #include <QVBoxLayout>
@@ -32,9 +32,283 @@
 #include <QRegularExpression>
 #include <QQueue>
 #include <QByteArray>
+#include <QComboBox>
+#include <QDialog>
+#include <QListWidget>
+#include <QSplitter>
 
 // ============================================================================
-// دوال مساعدة عامة (خطوط Gemini + بصمة الجهاز HWID + مسار ADB)
+// نافذة فرعية متقدمة لإدارة، إعادة تسمية، وتعديل محتوى ملفات الـ XML قبل الحقن
+// ============================================================================
+class XmlEditorDialog : public QDialog {
+    Q_OBJECT
+public:
+    XmlEditorDialog(const QString &extractedStagePath, const QString &detectedPkg, QWidget *parent = nullptr)
+        : QDialog(parent), stagePath(extractedStagePath), originalPkg(detectedPkg) {
+        setWindowTitle("محرر ومكتشف ملفات XML المتقدم - AbdullahTool");
+        resize(820, 520);
+        setLayoutDirection(Qt::RightToLeft);
+
+        setStyleSheet(R"(
+            QDialog {
+                background-color: #131314;
+                color: #E3E3E3;
+                font-family: 'IBM Plex Sans Arabic', 'Segoe UI';
+            }
+            QLabel { color: #E3E3E3; font-size: 13px; }
+            QLineEdit, QTextEdit {
+                background-color: #1E1F20;
+                border: 1px solid #333537;
+                border-radius: 8px;
+                color: #E3E3E3;
+                padding: 8px;
+                font-family: 'Consolas', monospace;
+                font-size: 12px;
+            }
+            QLineEdit:focus, QTextEdit:focus { border: 1px solid #A8C7FA; }
+            QListWidget {
+                background-color: #1E1F20;
+                border: 1px solid #333537;
+                border-radius: 8px;
+                color: #E3E3E3;
+                padding: 4px;
+            }
+            QListWidget::item { padding: 6px; border-radius: 4px; }
+            QListWidget::item:selected { background-color: #004A77; color: #C2E7FF; }
+            QPushButton {
+                background-color: #282A2C;
+                color: #E3E3E3;
+                border: 1px solid #333537;
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #333537; border: 1px solid #A8C7FA; }
+            QPushButton#SaveBtn {
+                background-color: #A8C7FA;
+                color: #062E6F;
+                border: none;
+            }
+            QPushButton#SaveBtn:hover { background-color: #D3E3FD; }
+        )");
+
+        QVBoxLayout *mainLayout = new QVBoxLayout(this);
+        mainLayout->setContentsMargins(16, 16, 16, 16);
+        mainLayout->setSpacing(12);
+
+        // شريط علوي يوضح الحزمة المكتشفة
+        QHBoxLayout *infoLayout = new QHBoxLayout();
+        QLabel *pkgInfoLbl = new QLabel(QString("📦 الحزمة الأصلية المكتشفة في النسخة: <b style='color:#FCD34D;'>%1</b>")
+                                          .arg(originalPkg.isEmpty() ? "غير معروفة (تلقائي)" : originalPkg), this);
+        infoLayout.addWidget(pkgInfoLbl);
+        infoLayout.addStretch();
+        mainLayout->addLayout(infoLayout);
+
+        // مقسم بين قائمة ملفات الـ XML ومحرر النصوص
+        QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
+
+        // الجانب الأيمن: قائمة ملفات الـ XML المكتشفة
+        QWidget *leftWidget = new QWidget(this);
+        QVBoxLayout *leftLayout = new QVBoxLayout(leftWidget);
+        leftLayout->setContentsMargins(0, 0, 0, 0);
+        leftLayout->addWidget(new QLabel("ملفات الإعدادات (XML) المتاحة للتعديل:", this));
+
+        xmlFileListWidget = new QListWidget(this);
+        leftLayout->addWidget(xmlFileListWidget);
+
+        // زر إعادة تسمية الملف المحدد
+        QPushButton *renameFileBtn = new QPushButton("✏️ إعادة تسمية الملف المحدد", this);
+        leftLayout->addWidget(renameFileBtn);
+        splitter->addWidget(leftWidget);
+
+        // الجانب الأيسر: محرر محتوى ملف الـ XML
+        QWidget *rightWidget = new QWidget(this);
+        QVBoxLayout *rightLayout = new QVBoxLayout(rightWidget);
+        rightLayout->setContentsMargins(0, 0, 0, 0);
+        rightLayout->addWidget(new QLabel("محتوى ملف الـ XML (مع إمكانية التعديل المباشر والبحث واستبدال اسم الحزمة):", this));
+
+        xmlContentEdit = new QTextEdit(this);
+        rightLayout->addWidget(xmlContentEdit);
+
+        // حقل استبدال سريع داخل محتوى XML
+        QHBoxLayout *replaceRow = new QHBoxLayout();
+        replaceOldInput = new QLineEdit(this);
+        replaceOldInput->setPlaceholderText("النص القديم (مثل اسم الحزمة القديم)...");
+        replaceOldInput->setText(originalPkg);
+
+        replaceNewInput = new QLineEdit(this);
+        replaceNewInput->setPlaceholderText("النص الجديد...");
+
+        QPushButton *replaceBtn = new QPushButton("🔄 استبدال في الملف", this);
+        replaceRow->addWidget(replaceOldInput, 1);
+        replaceRow->addWidget(replaceNewInput, 1);
+        replaceRow->addWidget(replaceBtn);
+        rightLayout->addLayout(replaceRow);
+
+        splitter->addWidget(rightWidget);
+        splitter->setSizes(QList<int>() << 280 << 540);
+        mainLayout->addWidget(splitter, 1);
+
+        // شريط الأزرار السفلي
+        QHBoxLayout *bottomRow = new QHBoxLayout();
+        QPushButton *autoFixBtn = new QPushButton("⚡ تصحيح تلقائي لأسماء الملفات والمحتوى", this);
+        QPushButton *saveAndCloseBtn = new QPushButton("✅ حفظ التعديلات وإغلاق", this);
+        saveAndCloseBtn.setObjectName("SaveBtn");
+
+        bottomRow->addWidget(autoFixBtn);
+        bottomRow->addStretch();
+        bottomRow->addWidget(saveAndCloseBtn);
+        mainLayout->addLayout(bottomRow);
+
+        // تحميل ملفات الـ XML الموجودة في مسار الـ stage
+        loadXmlFiles();
+
+        // ربط الأحداث
+        connect(xmlFileListWidget, &QListWidget::itemSelectionChanged, this, &XmlEditorDialog::onFileSelected);
+        connect(renameFileBtn, &QPushButton::clicked, this, &XmlEditorDialog::renameSelectedFile);
+        connect(replaceBtn, &QPushButton::clicked, this, &XmlEditorDialog::performQuickReplace);
+        connect(autoFixBtn, &QPushButton::clicked, this, &XmlEditorDialog::performAutoFix);
+        connect(saveAndCloseBtn, &QPushButton::clicked, this, &XmlEditorDialog::saveCurrentFileAndAccept);
+    }
+
+private:
+    QString stagePath;
+    QString originalPkg;
+    QListWidget *xmlFileListWidget;
+    QTextEdit *xmlContentEdit;
+    QLineEdit *replaceOldInput;
+    QLineEdit *replaceNewInput;
+    QString currentSelectedFilePath;
+
+    void loadXmlFiles() {
+        xmlFileListWidget->clear();
+        QDir dir(stagePath);
+        if (!dir.exists()) return;
+
+        // البحث التزايدي عن جميع ملفات .xml في المجلد والمجلدات الفرعية (مثل shared_prefs أو db)
+        QDirIterator it(stagePath, QStringList() << "*.xml", QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            QString filePath = it.next();
+            QString relPath = QDir(stagePath).relativeFilePath(filePath);
+            QListWidgetItem *item = new QListWidgetItem(relPath, xmlFileListWidget);
+            item->setData(Qt::UserRole, filePath);
+        }
+
+        if (xmlFileListWidget->count() > 0) {
+            xmlFileListWidget->setCurrentRow(0);
+        }
+    }
+
+    void onFileSelected() {
+        // حفظ تعديلات الملف السابق إن وجد
+        saveCurrentContentToDisk();
+
+        QListWidgetItem *item = xmlFileListWidget->currentItem();
+        if (!item) return;
+
+        currentSelectedFilePath = item->data(Qt::UserRole).toString();
+        QFile file(currentSelectedFilePath);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            xmlContentEdit->setPlainText(QString::fromUtf8(file.readAll()));
+            file.close();
+        } else {
+            xmlContentEdit->clear();
+        }
+    }
+
+    void saveCurrentContentToDisk() {
+        if (currentSelectedFilePath.isEmpty()) return;
+        QFile file(currentSelectedFilePath);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+            QTextStream out(&file);
+            out.setEncoding(QStringConverter::Utf8);
+            out << xmlContentEdit->toPlainText();
+            file.close();
+        }
+    }
+
+    void renameSelectedFile() {
+        QListWidgetItem *item = xmlFileListWidget->currentItem();
+        if (!item) return;
+
+        QString oldPath = item->data(Qt::UserRole).toString();
+        QFileInfo fi(oldPath);
+        QString oldName = fi.fileName();
+
+        // نافذة إدخال الاسم الجديد
+        bool ok;
+        QString newName = QInputDialog::getText(this, "إعادة تسمية ملف XML", "أدخل الاسم الجديد للملف:", QLineEdit::Normal, oldName, &ok);
+        if (ok && !newName.isEmpty() && newName != oldName) {
+            QString newPath = fi.absolutePath() + "/" + newName;
+            if (QFile::rename(oldPath, newPath)) {
+                loadXmlFiles();
+                QMessageBox::information(this, "تم بنجاح", "تمت إعادة تسمية الملف بنجاح.");
+            } else {
+                QMessageBox::warning(this, "خطأ", "تعذر إعادة تسمية الملف!");
+            }
+        }
+    }
+
+    void performQuickReplace() {
+        QString oldText = replaceOldInput->text();
+        QString newText = replaceNewInput->text();
+        if (oldText.isEmpty()) {
+            QMessageBox::warning(this, "تنبيه", "يرجى كتابة النص المراد استبداله!");
+            return;
+        }
+
+        QString content = xmlContentEdit->toPlainText();
+        if (content.contains(oldText)) {
+            content.replace(oldText, newText);
+            xmlContentEdit->setPlainText(content);
+            QMessageBox::information(this, "تم الاستبدال", "تمت عملية الاستبدال في المحتوى الحالي بنجاح.");
+        } else {
+            QMessageBox::information(this, "غير موجود", "النص المراد استبداله غير موجود في هذا الملف.");
+        }
+    }
+
+    void performAutoFix() {
+        saveCurrentContentToDisk();
+        int fixedCount = 0;
+
+        QDirIterator it(stagePath, QStringList() << "*.xml", QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            QString filePath = it.next();
+            QFile file(filePath);
+            if (file.open(QIODevice::ReadWrite | QIODevice::Text)) {
+                QString content = QString::fromUtf8(file.readAll());
+                bool modified = false;
+
+                // إذا كان اسم الحزمة الأصلية موجوداً داخل محتوى XML، يتم استبداله بالحزمة الجديدة أو تنظيفه
+                if (!originalPkg.isEmpty() && content.contains(originalPkg)) {
+                    content.replace(originalPkg, replaceNewInput->text().trimmed().isEmpty() ? "com.uu" : replaceNewInput->text().trimmed());
+                    modified = true;
+                }
+
+                if (modified) {
+                    file.resize(0);
+                    QTextStream out(&file);
+                    out.setEncoding(QStringConverter::Utf8);
+                    out << content;
+                    fixedCount++;
+                }
+                file.close();
+            }
+        }
+
+        onFileSelected(); // تحديث المحرر
+        QMessageBox::information(this, "التصحيح التلقائي", QString("تم تصحيح وتحديث محتوى %1 ملف XML تلقائياً.").arg(fixedCount));
+    }
+
+    void saveCurrentFileAndAccept() {
+        saveCurrentContentToDisk();
+        accept();
+    }
+};
+
+// ============================================================================
+// الدوال المساعدة العامة (خطوط Gemini + بصمة الجهاز HWID + مسار ADB)
 // ============================================================================
 
 static void setupGeminiTypography(QApplication &app) {
@@ -179,12 +453,12 @@ public:
         QLabel *logoBadge = new QLabel("✨ ABDULLAH TOOL", brandPanel);
         logoBadge->setStyleSheet("font-size: 21px; font-weight: bold; color: #A8C7FA; background: transparent;");
 
-        QLabel *editionLabel = new QLabel("PRO ENTERPRISE EDITION • V2.2", brandPanel);
+        QLabel *editionLabel = new QLabel("PRO ENTERPRISE EDITION • V2.3", brandPanel);
         editionLabel->setStyleSheet("font-size: 11px; font-weight: 600; color: #8E918F; background: transparent;");
 
         QLabel *descLabel = new QLabel(
             "الأداة الاحترافية المتكاملة لإدارة وصيانة أجهزة الأندرويد، "
-            "استخراج وحقن بيانات الحزم (data/data)، الربط اللاسلكي، وتنفيذ أوامر النظام المتقدمة.",
+            "استخراج الحزم، محرر XML المتقدم، الربط اللاسلكي، وتحويل بيانات (data/data).",
             brandPanel
         );
         descLabel->setWordWrap(true);
@@ -343,7 +617,7 @@ public:
     };
 
     MainWindow(QWidget *parent = nullptr) : QMainWindow(parent) {
-        setWindowTitle("AbdullahTool Pro v2.2 - النظام المتكامل لإدارة أجهزة الأندرويد");
+        setWindowTitle("AbdullahTool Pro v2.3 - النظام المتكامل لإدارة أجهزة الأندرويد");
         resize(1180, 780);
         setMinimumSize(1020, 680);
         setLayoutDirection(Qt::RightToLeft);
@@ -429,7 +703,7 @@ public:
                 background-color: #601410;
                 color: #FFFFFF;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background-color: #131314;
                 border: 1px solid #333537;
                 border-radius: 10px;
@@ -437,9 +711,10 @@ public:
                 color: #E3E3E3;
                 font-size: 13px;
             }
-            QLineEdit:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #A8C7FA;
             }
+            QComboBox::drop-down { border: 0px; }
             QProgressBar {
                 background-color: #282A2C;
                 border: 1px solid #333537;
@@ -476,7 +751,7 @@ public:
         pagesStack = new QStackedWidget(this);
         pagesStack->addWidget(createDashboardPage());      // 0: معلومات الهاتف والتحكم
         pagesStack->addWidget(createAppManagerPage());     // 1: مدير التطبيقات APK
-        pagesStack->addWidget(createBackupRestorePage());  // 2: النسخ الاحتياطي وحقن data/data
+        pagesStack->addWidget(createBackupRestorePage());  // 2: النسخ الاحتياطي وحقن data/data والمحرر
         pagesStack->addWidget(createFileTransferPage());   // 3: نقل وسحب الملفات
         pagesStack->addWidget(createShellTerminalPage());  // 4: أوامر Shell المتقدمة
 
@@ -490,7 +765,7 @@ public:
         connect(deviceTimer, &QTimer::timeout, this, &MainWindow::checkDeviceSilently);
         deviceTimer->start(3500);
 
-        appendLog("تم تشغيل AbdullahTool Pro v2.2 بنجاح. جميع الأنظمة جاهزة.", "SUCCESS");
+        appendLog("تم تشغيل AbdullahTool Pro v2.3 بنجاح. جميع الأنظمة جاهزة.", "SUCCESS");
         checkDeviceSilently();
     }
 
@@ -507,41 +782,41 @@ private:
     QProgressBar *operationProgress;
     QTimer *deviceTimer;
 
-    // طابور المهام المتسلسلة لمنع تداخل أوامر ADB أثناء استعادة البيانات
     QQueue<AdbStep> stepQueue;
     bool isSequenceRunning = false;
 
-    // عناصر الصفحة 0: لوحة المعلومات
+    // عناصر الصفحة 0
     QLabel *valModel;
     QLabel *valAndroid;
     QLabel *valSerial;
     QProgressBar *batteryBar;
 
-    // عناصر الصفحة 1: التطبيقات
+    // عناصر الصفحة 1
     QLineEdit *apkPathInput;
     QCheckBox *chkReplaceApk;
     QCheckBox *chkGrantPerms;
     QLineEdit *pkgNameInput;
 
-    // عناصر الصفحة 2: النسخ الاحتياطي واستعادة data/data
+    // عناصر الصفحة 2: النسخ الاحتياطي ومحرر XML
     QLineEdit *backupPkgInput;
     QLineEdit *backupOutPathInput;
     QCheckBox *chkIncludeApkInBackup;
     QLineEdit *abFileInput;
     QLineEdit *tarOutputInput;
     QLineEdit *restoreSourceInput;
-    QLineEdit *restoreTargetPkgInput;
+    QComboBox *restoreTargetPkgCombo;   // القائمة المنسدلة الجديدة للحزم الهدف
+    QString detectedOriginalPkg;       // الحزمة الأصلية المكتشفة تلقائياً من الأرشيف
 
-    // عناصر الصفحة 3: نقل الملفات
+    // عناصر الصفحة 3
     QLineEdit *pushLocalInput;
     QLineEdit *pushRemoteInput;
     QLineEdit *pullRemoteInput;
     QLineEdit *pullLocalInput;
 
-    // عناصر الصفحة 4: أوامر Shell
+    // عناصر الصفحة 4
     QLineEdit *customShellInput;
 
-    // --- الشريط العلوي مع الربط اللاسلكي السريع ---
+    // --- الشريط العلوي ---
     QWidget* createTopBar() {
         QFrame *topBar = new QFrame(this);
         topBar->setObjectName("TopBar");
@@ -556,7 +831,6 @@ private:
         licenseBadge = new QLabel("🛡️ اشتراك مفعل", topBar);
         licenseBadge->setStyleSheet("background-color: #004A77; color: #C2E7FF; padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: bold;");
 
-        // حقل ربط لاسلكي سريع للأجهزة ذات منفذ الشحن المعطل
         wifiIpInput = new QLineEdit(topBar);
         wifiIpInput->setPlaceholderText("IP:Port لاسلكي (مثال 192.168.1.15:5555)");
         wifiIpInput->setFixedWidth(230);
@@ -566,7 +840,7 @@ private:
         connect(wifiConnectBtn, &QPushButton::clicked, this, [=]() {
             QString addr = wifiIpInput->text().trimmed();
             if (addr.isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "أدخل عنوان IP والمنفذ أولاً للربط اللاسلكي (مثال: 192.168.1.15:5555)");
+                QMessageBox::warning(this, "تنبيه", "أدخل عنوان IP والمنفذ أولاً للربط اللاسلكي!");
                 return;
             }
             appendLog("جاري الاتصال لاسلكياً بالجهاز: " + addr, "INFO");
@@ -619,7 +893,7 @@ private:
         QList<NavItem> items = {
             {"📊  معلومات الهاتف والتحكم", 0},
             {"📦  مدير التطبيقات (APK)", 1},
-            {"🧬  بيانات الحزم (ab / data)", 2},
+            {"🧬  بيانات وحزم data/data", 2},
             {"📁  نقل وسحب الملفات", 3},
             {"💻  أوامر Shell المتقدمة", 4}
         };
@@ -849,7 +1123,7 @@ private:
         return page;
     }
 
-    // --- الصفحة 2: النسخ الاحتياطي (.ab) وفك الضغط واستعادة البيانات إلى مسار /data/data/<pkg> ---
+    // --- الصفحة 2: النسخ الاحتياطي (.ab) ومحرر XML وقائمة الحزم المستهدفة ---
     QWidget* createBackupRestorePage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
@@ -857,12 +1131,12 @@ private:
         layout->setContentsMargins(22, 18, 22, 18);
         layout->setSpacing(12);
 
-        QLabel *title = new QLabel("🧬 استوديو النسخ الاحتياطي (.ab) واستعادة البيانات إلى مسار الحزمة (/data/data)", page);
+        QLabel *title = new QLabel("🧬 استوديو النسخ الاحتياطي ومحرر ملفات XML واستعادة بيانات الحزم (/data/data)", page);
         title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
         layout->addWidget(title);
 
         // 1. سحب نسخة احتياطية بصيغة .ab
-        QLabel *sec1 = new QLabel("1️⃣ إنشاء نسخة احتياطية رسمية لبيانات حزمة معينة إلى ملف (.ab):", page);
+        QLabel *sec1 = new QLabel("1️⃣ إنشاء نسخة احتياطية رسمية لحزمة معينة إلى ملف (.ab):", page);
         sec1->setStyleSheet("color: #A8C7FA; font-size: 13px; font-weight: bold;");
         layout->addWidget(sec1);
 
@@ -871,8 +1145,6 @@ private:
         backupPkgInput->setPlaceholderText("اسم الحزمة المراد نسخها (مثال: com.uu)");
 
         backupOutPathInput = new QLineEdit(QDir::homePath() + "/Desktop/backup.ab", page);
-        backupOutPathInput->setPlaceholderText("مسار حفظ ملف .ab على الكمبيوتر...");
-
         QPushButton *browseBackupOutBtn = new QPushButton("حفظ باسم...", page);
         browseBackupOutBtn->setProperty("class", "SecondaryBtn");
         connect(browseBackupOutBtn, &QPushButton::clicked, this, [=]() {
@@ -880,22 +1152,20 @@ private:
             if (!f.isEmpty()) backupOutPathInput->setText(f);
         });
 
-        chkIncludeApkInBackup = new QCheckBox("تضمين ملف APK", page);
-        chkIncludeApkInBackup->setChecked(false);
-
-        QPushButton *doBackupBtn = new QPushButton("💾 سحب ملف .ab", page);
+        chkIncludeApkInBackup = new QCheckBox("تضمين APK", page);
+        QPushButton *doBackupBtn = new QPushButton("💾 سحب .ab", page);
         doBackupBtn->setProperty("class", "ActionBtn");
         connect(doBackupBtn, &QPushButton::clicked, this, [=]() {
             QString pkg = backupPkgInput->text().trimmed();
             QString out = backupOutPathInput->text().trimmed();
             if (pkg.isEmpty() || out.isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "يرجى إدخال اسم الحزمة ومسار حفظ ملف .ab!");
+                QMessageBox::warning(this, "تنبيه", "أدخل اسم الحزمة ومسار حفظ ملف .ab!");
                 return;
             }
             QStringList args = {"backup", "-f", out};
             args << (chkIncludeApkInBackup->isChecked() ? "-apk" : "-noapk");
             args << pkg;
-            appendLog("جاري طلب النسخ الاحتياطي للحزمة " + pkg + " (يرجى الموافقة من شاشة الهاتف الآن)...", "WARN");
+            appendLog("طلب النسخ الاحتياطي للحزمة " + pkg + " (يُرجى الموافقة من شاشة الهاتف)...", "WARN");
             runAdbCommand(args, "انتهت عملية إنشاء ملف النسخة الاحتياطية: " + out);
         });
 
@@ -906,8 +1176,8 @@ private:
         backupRow->addWidget(doBackupBtn);
         layout->addLayout(backupRow);
 
-        // 2. فك وتحويل ملف .ab إلى أرشيف .tar مباشرة من داخل الأداة
-        QLabel *sec2 = new QLabel("2️⃣ تحويل وفك ضغط ملف (.ab) إلى أرشيف (.tar) جاهز للاستخراج أو الحقن:", page);
+        // 2. فك .ab وتحديد الحزمة الأصلية تلقائياً
+        QLabel *sec2 = new QLabel("2️⃣ تحويل ملف (.ab) إلى (.tar) واكتشاف الحزمة الأصلية تلقائياً:", page);
         sec2->setStyleSheet("color: #FCD34D; font-size: 13px; font-weight: bold; margin-top: 6px;");
         layout->addWidget(sec2);
 
@@ -922,9 +1192,7 @@ private:
             if (!f.isEmpty()) {
                 abFileInput->setText(f);
                 QString tarSuggested = f;
-                if (tarSuggested.endsWith(".ab", Qt::CaseInsensitive)) {
-                    tarSuggested.chop(3);
-                }
+                if (tarSuggested.endsWith(".ab", Qt::CaseInsensitive)) tarSuggested.chop(3);
                 tarOutputInput->setText(tarSuggested + ".tar");
             }
         });
@@ -932,17 +1200,25 @@ private:
         tarOutputInput = new QLineEdit(page);
         tarOutputInput->setPlaceholderText("مسار ملف .tar الناتج...");
 
-        QPushButton *convertAbBtn = new QPushButton("⚙️ فك .ab إلى .tar", page);
+        QPushButton *convertAbBtn = new QPushButton("⚙️ فك واكتشاف الحزمة", page);
         convertAbBtn->setProperty("class", "SecondaryBtn");
         connect(convertAbBtn, &QPushButton::clicked, this, [=]() {
             QString inAb = abFileInput->text().trimmed();
             QString outTar = tarOutputInput->text().trimmed();
             if (inAb.isEmpty() || outTar.isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "يرجى تحديد ملف .ab ومسار حفظ ملف .tar!");
+                QMessageBox::warning(this, "تنبيه", "تحديد ملف .ab ومسار .tar مطلوب!");
                 return;
             }
             if (convertAbFileToTar(inAb, outTar)) {
                 restoreSourceInput->setText(outTar);
+                // اكتشاف اسم الحزمة الأصلي تلقائياً من الأرشيف
+                detectedOriginalPkg = detectOriginalPackageFromTar(outTar);
+                if (!detectedOriginalPkg.isEmpty()) {
+                    appendLog("✔ تم اكتشاف اسم الحزمة الأصلية تلقائياً بنجاح: " + detectedOriginalPkg, "SUCCESS");
+                    QMessageBox::information(this, "اكتشاف الحزمة", "تم اكتشاف الحزمة الأصلية تلقائياً:\n" + detectedOriginalPkg);
+                } else {
+                    appendLog("لم يتم التعرف على اسم الحزمة الأصلية تلقائياً.", "WARN");
+                }
             }
         });
 
@@ -952,60 +1228,131 @@ private:
         unpackRow->addWidget(convertAbBtn);
         layout->addLayout(unpackRow);
 
-        // 3. استعادة وحقن البيانات إلى مسار /data/data/<targetPkg> (مثال: com.uu)
-        QLabel *sec3 = new QLabel("3️⃣ استعادة واستبدال محتوى بيانات الحزمة الهدف (/data/data/com.uu) من ملف .tar أو .ab أو مجلد:", page);
-        sec3->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold; margin-top: 6px;");
+        // 3. محرر ملفات الـ XML المتقدم قبل الحقن
+        QLabel *sec3 = new QLabel("3️⃣ مراجعة، إعادة تسمية، وتعديل محتوى ملفات الـ XML المستخرجة:", page);
+        sec3->setStyleSheet("color: #38BDF8; font-size: 13px; font-weight: bold; margin-top: 6px;");
         layout->addWidget(sec3);
+
+        QHBoxLayout *editorRow = new QHBoxLayout();
+        QPushButton *openXmlEditorBtn = new QPushButton("📝 فتح محرر ومكتشف ملفات XML المتقدم", page);
+        openXmlEditorBtn->setProperty("class", "SecondaryBtn");
+        connect(openXmlEditorBtn, &QPushButton::clicked, this, [=]() {
+            QString src = restoreSourceInput->text().trimmed();
+            if (src.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "يرجى تحديد ملف .tar أو مجلد البيانات أولاً!");
+                return;
+            }
+            // فك الـ tar مؤقتاً في مجلد مؤقت محلي على الكمبيوتر إذا كان ملف tar لتعديل محتواه
+            QString tempStage = QDir::tempPath() + "/abdullah_xml_editor_stage";
+            QDir(tempStage).removeRecursively();
+            QDir().mkpath(tempStage);
+
+            if (src.endsWith(".tar", Qt::CaseInsensitive)) {
+                // استخراج محتوى tar محلياً عبر أداة استخراج أو قراءة بسيطة
+                extractTarLocally(src, tempStage);
+            } else if (QFileInfo(src).isDir()) {
+                copyDirectoryRecursively(src, tempStage);
+            }
+
+            XmlEditorDialog editor(tempStage, detectedOriginalPkg, this);
+            if (editor.exec() == QDialog::Accepted) {
+                appendLog("تم حفظ تعديلات ملفات الـ XML بنجاح.", "SUCCESS");
+            }
+        });
+        editorRow->addWidget(openXmlEditorBtn);
+        editorRow->addStretch();
+        layout->addLayout(editorRow);
+
+        // 4. استعادة وحقن البيانات مع القائمة المنسدلة للحزم الهدف (5 أسماء حزم وهمية مسبقة + إمكانية الكتابة)
+        QLabel *sec4 = new QLabel("4️⃣ استعادة وحقن البيانات إلى الحزمة الهدف مع القائمة المنسدلة:", page);
+        sec4->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold; margin-top: 6px;");
+        layout->addWidget(sec4);
 
         QHBoxLayout *restoreRow = new QHBoxLayout();
         restoreSourceInput = new QLineEdit(page);
-        restoreSourceInput->setPlaceholderText("اختر ملف (.tar أو .ab) أو مجلد البيانات المستخرج...");
+        restoreSourceInput->setPlaceholderText("ملف (.tar / .ab) أو المجلد المستخرج...");
 
-        QPushButton *browseTarBtn = new QPushButton("📄 ملف (.tar/.ab)", page);
+        QPushButton *browseTarBtn = new QPushButton("📄 ملف", page);
         browseTarBtn->setProperty("class", "SecondaryBtn");
         connect(browseTarBtn, &QPushButton::clicked, this, [=]() {
-            QString f = QFileDialog::getOpenFileName(this, "اختر ملف tar أو ab", "", "Backup Archives (*.tar *.ab);;All Files (*.*)");
+            QString f = QFileDialog::getOpenFileName(this, "اختر ملف tar أو ab", "", "Archives (*.tar *.ab);;All Files (*.*)");
             if (!f.isEmpty()) restoreSourceInput->setText(f);
         });
 
-        QPushButton *browseDirBtn = new QPushButton("📁 أو مجلد", page);
-        browseDirBtn->setProperty("class", "SecondaryBtn");
-        connect(browseDirBtn, &QPushButton::clicked, this, [=]() {
-            QString d = QFileDialog::getExistingDirectory(this, "اختر مجلد البيانات المستخرج");
-            if (!d.isEmpty()) restoreSourceInput->setText(d);
+        // القائمة المنسدلة الجديدة للحزم الهدف (5 أسماء حزم وهمية للاختبار + قابلة للتعديل والتحرير)
+        restoreTargetPkgCombo = new QComboBox(page);
+        restoreTargetPkgCombo->setEditable(true); // يتيح للمستخدم الكتابة اليدوية أو الاختيار
+        restoreTargetPkgCombo->addItems({
+            "com.whatsapp",
+            "com.universe.messenger",
+            "com.nasa",
+            "com.android.ab",
+            "com.android.meta"
         });
+        restoreTargetPkgCombo->setFixedWidth(210);
 
-        restoreTargetPkgInput = new QLineEdit("com.uu", page);
-        restoreTargetPkgInput->setPlaceholderText("الحزمة الهدف (مثال: com.uu)");
-        restoreTargetPkgInput->setFixedWidth(190);
-
-        QPushButton *doRestoreBtn = new QPushButton("🚀 حقن واستبدال بيانات الحزمة", page);
+        QPushButton *doRestoreBtn = new QPushButton("🚀 حقن البيانات واستبدالها", page);
         doRestoreBtn->setProperty("class", "ActionBtn");
         connect(doRestoreBtn, &QPushButton::clicked, this, [=]() {
-            restoreDataToPackage(restoreSourceInput->text().trimmed(), restoreTargetPkgInput->text().trimmed());
+            restoreDataToPackage(restoreSourceInput->text().trimmed(), restoreTargetPkgCombo->currentText().trimmed());
         });
 
         restoreRow->addWidget(restoreSourceInput, 2);
         restoreRow->addWidget(browseTarBtn);
-        restoreRow->addWidget(browseDirBtn);
-        restoreRow->addWidget(restoreTargetPkgInput);
+        restoreRow->addWidget(new QLabel("الحزمة الهدف:", page));
+        restoreRow->addWidget(restoreTargetPkgCombo);
         restoreRow->addWidget(doRestoreBtn);
         layout->addLayout(restoreRow);
-
-        QLabel *hintLbl = new QLabel(
-            "💡 ملاحظة تقنية: تقوم الأداة تلقائياً بإيقاف الحزمة الهدف (مثل com.uu)، وتحويل مسارات أرشيف النسخة الاحتياطية "
-            "(db → databases و sp → shared_prefs و f → files و r → الجذر) إلى داخل /data/data/<package> مع ضبط الصلاحيات عبر (run-as أو Root su).",
-            page
-        );
-        hintLbl->setWordWrap(true);
-        hintLbl->setStyleSheet("color: #8E918F; font-size: 12px; margin-top: 4px;");
-        layout->addWidget(hintLbl);
 
         layout->addStretch();
         return page;
     }
 
-    // --- الصفحة 3: استوديو نقل الملفات (Pull & Push) ---
+    // --- اكتشاف اسم الحزمة الأصلي تلقائياً من هيكل ملف الـ tar ---
+    QString detectOriginalPackageFromTar(const QString &tarPath) {
+        QProcess proc;
+        proc.start(getAdbExecutablePath(), {"shell", " tar -tf " + tarPath}); // محاكاة أو استخدام أمر محلي إن توفر
+        // بدلاً من الاعتماد على adb للتفتیش المحلي، نقوم بقراءة أول 50 سطر من محتويات ملف tar محلياً إن أمكن أو عبر أمر بسيط
+        // طريقة برمجية نقية عبر فحص رؤوس tar محلياً أو تخزينها مؤقتاً:
+        QFile file(tarPath);
+        if (!file.open(QIODevice::ReadOnly)) return QString();
+
+        // قراءة عينة من ملف الـ tar للبحث عن نمط apps/COM.NAME/
+        QByteArray sample = file.read(512 * 200); // أول 100 كيلوبايت
+        file.close();
+
+        QRegularExpression rx("apps/([a-zA-Z0-9_]+\\.[a-zA-Z0-9_\\.]+)/");
+        QRegularExpressionMatch match = rx.match(QString::fromUtf8(sample));
+        if (match.hasMatch()) {
+            return match.captured(1);
+        }
+        return QString();
+    }
+
+    // استخراج tar محلياً في مجلد مؤقت على الكمبيوتر للتعديل عبر محرر XML
+    void extractTarLocally(const QString &tarPath, const QString &destDir) {
+        // يتم استخدام الأداة أو فك تدفق البايتات المبسط
+        // لتجنب الاعتماد الخارجي، نعتمد على استدعاء 7z أو tar إن وجد، أو نسخ الملف واستخدامه
+        QProcess p;
+        p.start("tar", QStringList() << "-xf" << tarPath << "-C" << destDir);
+        p.waitForFinished(3000);
+    }
+
+    void copyDirectoryRecursively(const QString &fromDir, const QString &toDir) {
+        QDir().mkpath(toDir);
+        QDirIterator it(fromDir, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            QString filePath = it.next();
+            QString relPath = QDir(fromDir).relativeFilePath(filePath);
+            if (QFileInfo(filePath).isDir()) {
+                QDir().mkpath(toDir + "/" + relPath);
+            } else {
+                QFile::copy(filePath, toDir + "/" + relPath);
+            }
+        }
+    }
+
+    // --- الصفحة 3: نقل الملفات ---
     QWidget* createFileTransferPage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
@@ -1037,7 +1384,7 @@ private:
         doPushBtn->setProperty("class", "ActionBtn");
         connect(doPushBtn, &QPushButton::clicked, this, [=]() {
             if (pushLocalInput->text().isEmpty() || pushRemoteInput->text().isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "يرجى تحديد ملف الكمبيوتر ومسار الهاتف!");
+                QMessageBox::warning(this, "تنبيه", "حدد ملف الكمبيوتر ومسار الهاتف!");
                 return;
             }
             appendLog("جاري إرسال الملف إلى الهاتف...", "INFO");
@@ -1069,7 +1416,7 @@ private:
         doPullBtn->setProperty("class", "ActionBtn");
         connect(doPullBtn, &QPushButton::clicked, this, [=]() {
             if (pullRemoteInput->text().isEmpty() || pullLocalInput->text().isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "يرجى تحديد مسار الهاتف ومجلد الكمبيوتر!");
+                QMessageBox::warning(this, "تنبيه", "حدد مسار الهاتف ومجلد الكمبيوتر!");
                 return;
             }
             appendLog("جاري سحب الملفات من الهاتف إلى الكمبيوتر...", "INFO");
@@ -1086,7 +1433,7 @@ private:
         return page;
     }
 
-    // --- الصفحة 4: موجه الأوامر المتقدم (Shell & Quick Tools) ---
+    // --- الصفحة 4: موجه الأوامر المتقدم ---
     QWidget* createShellTerminalPage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
@@ -1198,7 +1545,6 @@ private:
     // الدوال البرمجية لتحويل ملفات .ab واستعادة بيانات الحزم (/data/data/<pkg>)
     // ============================================================================
 
-    // تحويل ملف Android Backup (.ab غير المشفر بكلمة مرور) إلى أرشيف .tar مباشرة عبر محرك Zlib المدمج في Qt
     bool convertAbFileToTar(const QString &abFilePath, const QString &tarFilePath) {
         QFile inFile(abFilePath);
         if (!inFile.open(QIODevice::ReadOnly)) {
@@ -1214,11 +1560,6 @@ private:
             return false;
         }
 
-        // تخطي الأسطر الأربعة الأولى لرأسية ملف .ab:
-        // السطر 1: ANDROID BACKUP
-        // السطر 2: رقم الإصدار
-        // السطر 3: حالة الضغط (1 = مضغوط بـ zlib، 0 = غير مضغوط)
-        // السطر 4: التشفير (none = غير مشفر)
         int newlinesFound = 0;
         int headerEndOffset = -1;
         QList<QByteArray> headerLines;
@@ -1245,7 +1586,7 @@ private:
         QByteArray encryptionType = headerLines.at(3);
 
         if (encryptionType != "none") {
-            appendLog("ملف .ab محمي بكلمة مرور (" + QString::fromUtf8(encryptionType) + "). يرجى أخذ نسخة بدون كلمة مرور.", "ERROR");
+            appendLog("ملف .ab محمي بكلمة مرور (" + QString::fromUtf8(encryptionType) + ").", "ERROR");
             return false;
         }
 
@@ -1253,8 +1594,7 @@ private:
         QByteArray tarData;
 
         if (compressedFlag == "1") {
-            appendLog("جاري فك ضغط بيانات Zlib من ملف .ab وتحويلها إلى .tar...", "INFO");
-            // دالة qUncompress في Qt تتطلب إضافة 4 بايت في البداية تمثل الحجم المتوقع بعد الفك
+            appendLog("جاري فك ضغط بيانات Zlib من ملف .ab...", "INFO");
             QByteArray qtZlibBuffer;
             quint32 expectedSize = qMin<quint64>(quint64(payload.size()) * 6ULL, 0x7FFFFFFFULL);
             qtZlibBuffer.append(char((expectedSize >> 24) & 0xFF));
@@ -1274,48 +1614,40 @@ private:
 
         QFile outFile(tarFilePath);
         if (!outFile.open(QIODevice::WriteOnly)) {
-            appendLog("تعذر إنشاء ملف .tar في المسار المحدد: " + tarFilePath, "ERROR");
+            appendLog("تعذر إنشاء ملف .tar: " + tarFilePath, "ERROR");
             return false;
         }
 
         outFile.write(tarData);
         outFile.close();
 
-        appendLog(QString("تم تحويل ملف .ab إلى أرشيف .tar بنجاح (%1 كيلوبايت): %2")
-                      .arg(tarData.size() / 1024)
-                      .arg(tarFilePath), "SUCCESS");
+        appendLog(QString("تم تحويل ملف .ab إلى أرشيف .tar بنجاح: %1").arg(tarFilePath), "SUCCESS");
         return true;
     }
 
-    // دالة استعادة وحقن ملف .tar أو .ab أو مجلد مستخرج إلى مسار الحزمة المختارة (مثل /data/data/com.uu)
     void restoreDataToPackage(const QString &sourcePath, const QString &targetPkg) {
         if (sourcePath.isEmpty() || targetPkg.isEmpty()) {
-            QMessageBox::warning(this, "تنبيه", "يرجى اختيار ملف (.tar / .ab) أو المجلد، وكتابة اسم الحزمة الهدف (مثال: com.uu)!");
+            QMessageBox::warning(this, "تنبيه", "يرجى تحديد الملف/المجلد واسم الحزمة الهدف!");
             return;
         }
 
-        // التحقق من صحة اسم الحزمة لمنع أي رموز خاطئة
         QRegularExpression pkgRegex("^[a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)+$");
         if (!pkgRegex.match(targetPkg).hasMatch()) {
-            QMessageBox::warning(this, "اسم حزمة غير صالح", "يرجى كتابة اسم حزمة أندرويد صحيح (مثال: com.uu أو com.example.app)");
+            QMessageBox::warning(this, "اسم حزمة غير صالح", "أدخل اسم حزمة أندرويد صحيح (مثال: com.uu)");
             return;
         }
 
         QFileInfo srcInfo(sourcePath);
         if (!srcInfo.exists()) {
-            appendLog("المسار المحدد غير موجود على الكمبيوتر: " + sourcePath, "ERROR");
+            appendLog("المسار المحدد غير موجود: " + sourcePath, "ERROR");
             return;
         }
 
         QString effectiveSource = sourcePath;
-
-        // إذا اختار المستخدم ملف .ab مباشرة، نقوم بتحويله تلقائياً إلى .tar أولاً ثم نكمل الاستعادة!
         if (srcInfo.isFile() && sourcePath.endsWith(".ab", Qt::CaseInsensitive)) {
             QString autoTarPath = QDir::tempPath() + "/abdullah_auto_converted.tar";
-            appendLog("تم اكتشاف ملف .ab، جاري تحويله تلقائياً إلى .tar قبل الحقن...", "INFO");
-            if (!convertAbFileToTar(sourcePath, autoTarPath)) {
-                return;
-            }
+            appendLog("تحويل ملف .ab تلقائياً إلى .tar...", "INFO");
+            if (!convertAbFileToTar(sourcePath, autoTarPath)) return;
             effectiveSource = autoTarPath;
             srcInfo = QFileInfo(effectiveSource);
         }
@@ -1323,57 +1655,49 @@ private:
         QString remoteStage = "/data/local/tmp/abdullah_restore_stage";
         QList<AdbStep> sequence;
 
-        // الخطوة 1: إيقاف تطبيق الحزمة الهدف (مثل com.uu) لمنع قفل قواعد البيانات SQLite
         sequence.append({
             {"shell", "am", "force-stop", targetPkg},
-            "1/5 إيقاف الحزمة الهدف مؤقتاً (" + targetPkg + ") لإغلاق قواعد البيانات المفتوحة...",
+            "1/5 إيقاف الحزمة الهدف مؤقتاً (" + targetPkg + ")...",
             ""
         });
 
-        // الخطوة 2: تجهيز المجلد الوسيط الآمن على الهاتف /data/local/tmp
         sequence.append({
             {"shell", "rm -rf " + remoteStage + " && mkdir -p " + remoteStage},
-            "2/5 تهيئة المسار الوسيط المؤقت على الهاتف (" + remoteStage + ")...",
+            "2/5 تجهيز المسار الوسيط المؤقت على الهاتف...",
             ""
         });
 
-        // الخطوة 3: رفع ملف الـ .tar أو المجلد وفك الضغط في المسار المؤقت
         if (srcInfo.isFile() && effectiveSource.endsWith(".tar", Qt::CaseInsensitive)) {
             QString remoteTar = remoteStage + "/payload.tar";
             sequence.append({
                 {"push", effectiveSource, remoteTar},
-                "3/5 جاري رفع أرشيف البيانات (.tar) إلى الهاتف...",
-                "تم رفع ملف الـ tar إلى الهاتف بنجاح."
+                "3/5 رفع أرشيف .tar إلى الهاتف...",
+                "تم رفع الأرشيف بنجاح."
             });
             sequence.append({
                 {"shell", "tar -xf " + remoteTar + " -C " + remoteStage + " && rm -f " + remoteTar + " && chmod -R 755 " + remoteStage},
-                "4/5 جاري فك ضغط الأرشيف وتجهيز صلاحيات القراءة المؤقتة...",
+                "4/5 فك ضغط الأرشيف على الهاتف...",
                 ""
             });
         } else if (srcInfo.isDir()) {
             sequence.append({
                 {"push", effectiveSource + "/.", remoteStage + "/"},
-                "3/5 جاري رفع مجلد البيانات المستخرج إلى الهاتف...",
-                "تم رفع المجلد إلى الهاتف بنجاح."
+                "3/5 رفع مجلد البيانات المستخرج إلى الهاتف...",
+                "تم رفع المجلد بنجاح."
             });
             sequence.append({
                 {"shell", "chmod -R 755 " + remoteStage},
-                "4/5 ضبط صلاحيات القراءة المؤقتة للملفات المرفوعة...",
+                "4/5 ضبط صلاحيات القراءة للملفات...",
                 ""
             });
-        } else {
-            appendLog("يرجى اختيار ملف بصيغة .tar أو .ab أو اختيار مجلد مستخرج!", "ERROR");
-            return;
         }
 
-        // الخطوة 5: سكريبت الحقن الذكي لتحويل مسارات (db, sp, f, r) أو المسارات المباشرة إلى /data/data/<targetPkg>
         QString restoreScript = QString(
             "PKG='%1'; "
             "STAGE='/data/local/tmp/abdullah_restore_stage'; "
             "APP_SRC=$(find $STAGE/apps -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1); "
             "if [ -z \"$APP_SRC\" ]; then APP_SRC=\"$STAGE\"; fi; "
             "if run-as $PKG true 2>/dev/null; then "
-            "  echo '--> [run-as mode] Injecting data directly into /data/data/'$PKG; "
             "  run-as $PKG sh -c \""
             "    rm -rf databases/* shared_prefs/* files/*; "
             "    mkdir -p databases shared_prefs files; "
@@ -1386,7 +1710,6 @@ private:
             "    if [ -d '$APP_SRC/r' ]; then cp -rf '$APP_SRC/r/.' ./; fi; "
             "  \"; "
             "elif su -c true 2>/dev/null; then "
-            "  echo '--> [Root su mode] Injecting data and fixing UID/SELinux for /data/data/'$PKG; "
             "  su -c \""
             "    DATA_DIR=/data/data/$PKG; "
             "    if [ ! -d \\$DATA_DIR ]; then echo 'ERROR: Target package not installed!'; exit 1; fi; "
@@ -1405,7 +1728,7 @@ private:
             "    restorecon -R \\$DATA_DIR 2>/dev/null || true; "
             "  \"; "
             "else "
-            "  echo 'ERROR: Cannot write to /data/data/'$PKG' (App is not debuggable for run-as, and device has no Root su)'; "
+            "  echo 'ERROR: Cannot write to /data/data/'$PKG; "
             "  rm -rf $STAGE; "
             "  exit 1; "
             "fi; "
@@ -1414,14 +1737,13 @@ private:
 
         sequence.append({
             {"shell", restoreScript},
-            "5/5 جاري حقن البيانات داخل /data/data/" + targetPkg + " وتصحيح الصلاحيات...",
-            "تم استبدال بيانات الحزمة " + targetPkg + " في /data/data/" + targetPkg + " بنجاح تام!"
+            "5/5 حقن البيانات داخل /data/data/" + targetPkg + " وتصحيح الصلاحيات...",
+            "تم استبدال بيانات الحزمة " + targetPkg + " بنجاح تام!"
         });
 
         runAdbSequence(sequence);
     }
 
-    // --- دالة إضافة سطر ملون ومؤرخ في السجل ---
     void appendLog(const QString &message, const QString &level = "INFO") {
         QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss");
         QString color = "#A8C7FA";
@@ -1437,7 +1759,6 @@ private:
         consoleBox->append(html);
     }
 
-    // --- تنفيذ سلسلة خطوات ADB بالترتيب (Sequential Queue) لضمان عدم تداخل الأوامر ---
     void runAdbSequence(const QList<AdbStep> &steps) {
         for (const AdbStep &s : steps) {
             stepQueue.enqueue(s);
@@ -1488,7 +1809,7 @@ private:
                 }
                 processNextStepInQueue();
             } else {
-                appendLog("توقفت السلسلة بسبب خطأ في الخطوة الحالية (كود الخروج: " + QString::number(exitCode) + ").", "ERROR");
+                appendLog("توقفت السلسلة بسبب خطأ في التنفيذ (كود الخروج: " + QString::number(exitCode) + ").", "ERROR");
                 stepQueue.clear();
                 isSequenceRunning = false;
                 operationProgress->setRange(0, 100);
@@ -1498,7 +1819,7 @@ private:
 
         connect(proc, &QProcess::errorOccurred, this, [=](QProcess::ProcessError) {
             proc->deleteLater();
-            appendLog("تعذر تشغيل ملف adb.exe! تأكد من وجود مجلد platform-tools بجانب الأداة.", "ERROR");
+            appendLog("تعذر تشغيل adb.exe!", "ERROR");
             stepQueue.clear();
             isSequenceRunning = false;
             operationProgress->setRange(0, 100);
@@ -1508,12 +1829,10 @@ private:
         proc->start(getAdbExecutablePath(), current.args);
     }
 
-    // --- تنفيذ أمر ADB مفرد ---
     void runAdbCommand(const QStringList &args, const QString &doneMsg = QString()) {
         runAdbSequence({{args, "", doneMsg}});
     }
 
-    // --- فحص اتصال الهاتف في الخلفية ---
     void checkDeviceSilently() {
         QProcess *proc = new QProcess(this);
         connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
@@ -1542,9 +1861,8 @@ private:
         proc->start(getAdbExecutablePath(), {"devices"});
     }
 
-    // --- قراءة مواصفات الهاتف ---
     void readFullDeviceInfo() {
-        appendLog("جاري قراءة مواصفات الهاتف المتصل...", "INFO");
+        appendLog("قراءة مواصفات الهاتف...", "INFO");
 
         QProcess *pModel = new QProcess(this);
         connect(pModel, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
@@ -1606,3 +1924,9 @@ int main(int argc, char *argv[]) {
 }
 
 #include "main.moc"
+'''
+
+with open("main.cpp", "w", encoding="utf-8") as f:
+    f.write(cpp_code)
+
+print("Successfully generated full main.cpp. Lines:", len(cpp_code.splitlines()))
