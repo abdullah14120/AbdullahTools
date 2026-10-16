@@ -445,7 +445,7 @@ public:
 
         QWidget *central = new QWidget(this);
         setCentralWidget(central);
-        QVBoxLayout *rootLayout = new QHBoxLayout(central) ? nullptr : new QVBoxLayout(central);
+        QVBoxLayout *rootLayout = new QVBoxLayout(central);
         rootLayout->setContentsMargins(0, 0, 0, 0);
         rootLayout->setSpacing(0);
 
