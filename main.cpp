@@ -29,6 +29,9 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QMouseEvent>
+#include <QRegularExpression>
+#include <QFile>
+#include <QTextStream>
 
 // ============================================================================
 // دوال مساعدة عامة (الخطوط + بصمة الجهاز + مسار ADB الذكي)
