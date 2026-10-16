@@ -26,12 +26,14 @@ jobs:
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         cmake --build build --config Release
 
-    - name: تجميع ملفات التشغيل وملفات ADB الرسمية
+    - name: تجميع ملفات التشغيل والخطوط العربية وملفات ADB
       shell: pwsh
       run: |
-        mkdir dist
-        # البحث عن ملف EXE الناتج ونسخه أينما وجد في مجلد البناء
-        $exePath = Get-ChildItem -Path "build" -Recurse -Filter "AbdullahTool.exe" | Select-Object -ExpandProperty FullName
+        mkdir -Force dist
+        mkdir -Force dist/fonts
+
+        # 1. نسخ ملف AbdullahTool.exe الناتج
+        $exePath = Get-ChildItem -Path "build" -Recurse -Filter "AbdullahTool.exe" | Select-Object -First 1 -ExpandProperty FullName
         if ($exePath) {
             Copy-Item $exePath -Destination "dist/"
             Write-Host "Found and copied: $exePath"
@@ -39,18 +41,34 @@ jobs:
             throw "AbdullahTool.exe not found!"
         }
 
-        # تشغيل windeployqt لجلب ملفات Qt اللازمة للتشغيل
+        # 2. تشغيل windeployqt لجلب ملفات تشغيل Qt
         $qtBin = "D:\a\AbdullahTools\Qt\6.6.2\msvc2019_64\bin\windeployqt.exe"
         if (Test-Path $qtBin) {
             & $qtBin --release --no-translations dist/AbdullahTool.exe
         }
 
-        # تحميل أدوات ADB الرسمية ودمجها
+        # 3. تحميل خطوط Google العربية الحديثة (المماثلة لخط Gemini) مباشرة إلى مجلد الأداة
+        $fontUrls = @{
+            "IBMPlexSansArabic-Regular.ttf"  = "https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexsansarabic/IBMPlexSansArabic-Regular.ttf"
+            "IBMPlexSansArabic-Medium.ttf"   = "https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexsansarabic/IBMPlexSansArabic-Medium.ttf"
+            "IBMPlexSansArabic-SemiBold.ttf" = "https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexsansarabic/IBMPlexSansArabic-SemiBold.ttf"
+            "IBMPlexSansArabic-Bold.ttf"     = "https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexsansarabic/IBMPlexSansArabic-Bold.ttf"
+        }
+        foreach ($name in $fontUrls.Keys) {
+            try {
+                Invoke-WebRequest -Uri $fontUrls[$name] -OutFile "dist/fonts/$name" -UseBasicParsing
+                Write-Host "Downloaded font: $name"
+            } catch {
+                Write-Host "Warning: Could not download $name"
+            }
+        }
+
+        # 4. تحميل أدوات ADB الرسمية ودمجها
         Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "adb.zip"
         Expand-Archive -Path "adb.zip" -DestinationPath "./dist" -Force
 
     - name: رفع الأداة الجاهزة للتحميل
       uses: actions/upload-artifact@v4
       with:
-        name: AbdullahTool-v1.0
+        name: AbdullahTool-v2.1-GeminiUI
         path: ./dist/
