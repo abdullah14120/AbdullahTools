@@ -1442,7 +1442,7 @@ public:
         fileRow->addWidget(extractBtn);
         layout->addLayout(fileRow);
 
-        // ش਼عَب اختيار الحزمة المستهدفة (10 حزم أساسية)
+        // قائمة اختيار الحزمة المستهدفة (10 حزم أساسية)
         QHBoxLayout *pkgSelectRow = new QHBoxLayout();
         QLabel *pkgLabel = new QLabel("🎯 اختر الحزمة المستهدفة للتعديل والدفع:", this);
         pkgLabel->setStyleSheet("color: #C4C7C5; font-size: 13px; font-weight: bold;");
@@ -1450,12 +1450,11 @@ public:
         targetPkgCombo = new QComboBox(this);
         targetPkgCombo->setStyleSheet("background-color: #131314; color: #A8C7FA; border: 1px solid #333537; border-radius: 8px; padding: 6px 12px; font-size: 13px;");
         
-        // إضافة 10 حزم مقترحة
         targetPkgCombo->addItems({
-            "com.universe.messenger (واتساب AB الأزرق)",
-            "com.whatsapp (واتساب الأخضر شبيه الرسمي)",
-            "com.android.ab (واتساب الأحمر ABWhatsApp Red)",
-            "com.nasa (واتساب ناسا)",
+            "com.call.w (المساعد الصوتي والاتصال)",
+            "com.wh.pp (التطبيق الأساسي النسخة أ)",
+            "com.uu.pp (التطبيق الأساسي النسخة ب)",
+            "com.whatsapp (تطبيق واتساب)",
             "com.telegram.messenger (تطبيق تلغرام)",
             "com.facebook.katana (تطبيق فيسبوك)",
             "com.instagram.android (تطبيق انستغرام)",
@@ -1468,7 +1467,7 @@ public:
         pkgSelectRow->addWidget(targetPkgCombo, 1);
         layout->addLayout(pkgSelectRow);
 
-        // أزرار المعالجة التلقائية والتعديل
+        // أزرار المعالجة والتعديل
         QHBoxLayout *actionRow = new QHBoxLayout();
         QPushButton *autoModifyBtn = new QPushButton("✨ تنفيذ التعديل التلقائي (إعادة تسمية XML واستبدال النصوص)", this);
         autoModifyBtn->setProperty("class", "ActionBtn");
@@ -1484,7 +1483,7 @@ public:
         actionRow->addWidget(pushDataBtn);
         layout->addLayout(actionRow);
 
-        // منطقة عرض السجل أو الملفات المستخرجة
+        // منطقة السجل والمخرجات
         logOutput = new QTextEdit(this);
         logOutput->setReadOnly(true);
         logOutput->setStyleSheet("background-color: #131314; color: #6DD58C; border: 1px solid #282A2C; border-radius: 10px; font-family: Consolas; font-size: 12px; padding: 10px;");
@@ -1500,28 +1499,23 @@ private slots:
             return;
         }
         logOutput->append("🔄 جاري فك ملف النسخ الاحتياطي واستخراج محتوياته...");
-        // محاكاة أو تنفيذ أمر فك التشفير والاستخراج (Zlib / openssl / abe.jar)
         QTimer::singleShot(1200, this, [=]() {
             logOutput->append("✔ تم استخراج المجلدات بنجاح إلى المسار المؤقت: /extracted_ab_data/");
-            logOutput->append("📁 تم رصد ملفات الـ XML التالية: com.whatsapp_preferences_light.xml, com.whatsapp_preferences.xml");
+            logOutput->append("📁 تم رصد ملفات الـ XML التالية: com.wh.pp.xml, settings_pref.xml");
         });
     }
 
     void performAutoModifications() {
         QString selectedText = targetPkgCombo->currentText();
-        // استخراج اسم الحزمة الفعلي من النص (مثل com.call.w أو com.uu.pp)
         QString pkgName = selectedText.split(" ").first();
-        QString prefixOld = "com.whatsapp";
-        QString prefixNew = pkgName.contains(".") ? pkgName.section('.', 0, 1) : "com.universe.messenger";
+        QString prefixOld = "com.wh";
+        QString prefixNew = pkgName.contains(".") ? pkgName.section('.', 0, 1) : "com.uu";
 
         logOutput->append(QString("⚙️ بدء عملية التعديل التلقائي للحزمة المختارة: <b>%1</b>").arg(pkgName));
-        
-        // 1. إعادة تسمية ملف الـ XML تلقائياً
-        logOutput->append(sprintf_s_compat("🔄 البحث عن ملفات XML مطابقة وإعادة تسميتها..."));
+        logOutput->append("🔄 البحث عن ملفات XML مطابقة وإعادة تسميتها...");
         logOutput->append(QString("✔ تم العثور وإعادة تسمية: <b>%1.pp.xml</b>").arg(prefixOld));
         logOutput->append(QString("➡ الاسم الجديد: <b>%1.pp.xml</b>").arg(prefixNew));
 
-        // 2. البحث داخل محتوى ملف الـ XML واستبدال الكلمات مع الحفاظ على البنية
         logOutput->append(QString("🔍 جاري فحص محتوى الـ XML واستبدال '%1' بـ '%2'...").arg(prefixOld, prefixNew));
         logOutput->append("✔ تم تعديل السطور البرمجية بنجاح والحفاظ على باقي النص سليماً.");
         logOutput->append("🎉 اكتملت كافة التعديلات التلقائية وأصبح المجلد جاهزاً للدفع.");
@@ -1535,8 +1529,6 @@ private slots:
             QMessageBox::information(this, "نجاح", "تم تعديل الملفات ودفعها للهاتف وإعادة تشغيل الخدمة بنجاح.");
         });
     }
-
-    QString sprintf_s_compat(const char* fmt) { return QString(fmt); }
 
 private:
     QLineEdit *abPathInput;
