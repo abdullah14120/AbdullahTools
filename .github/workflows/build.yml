@@ -1,4 +1,4 @@
-name: Build Abdullah Tool EXE
+name: Build AbdullahTool EXE
 
 on:
   push:
@@ -30,10 +30,22 @@ jobs:
       shell: pwsh
       run: |
         mkdir dist
-        cp build/Release/AbdullahTool.exe dist/
-        windeployqt --release --no-translations dist/AndroidTool.exe
-        
-        # تحميل أحدث أدوات ADB من جوجل ووضعها داخل المجلد النهائي
+        # البحث عن ملف EXE الناتج ونسخه أينما وجد في مجلد البناء
+        $exePath = Get-ChildItem -Path "build" -Recurse -Filter "AbdullahTool.exe" | Select-Object -ExpandProperty FullName
+        if ($exePath) {
+            Copy-Item $exePath -Destination "dist/"
+            Write-Host "Found and copied: $exePath"
+        } else {
+            throw "AbdullahTool.exe not found!"
+        }
+
+        # تشغيل windeployqt لجلب ملفات Qt اللازمة للتشغيل
+        $qtBin = "D:\a\AbdullahTools\Qt\6.6.2\msvc2019_64\bin\windeployqt.exe"
+        if (Test-Path $qtBin) {
+            & $qtBin --release --no-translations dist/AbdullahTool.exe
+        }
+
+        # تحميل أدوات ADB الرسمية ودمجها
         Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "adb.zip"
         Expand-Archive -Path "adb.zip" -DestinationPath "./dist" -Force
 
