@@ -32,10 +32,9 @@
 #include <QRegularExpression>
 #include <QQueue>
 #include <QByteArray>
-#include <QComboBox>
-#include <QDialog>
-#include <QListWidget>
-#include <QSplitter>
+#include <QDirIterator>
+#include <QInputDialog>
+#include <QTextStream>
 
 // ============================================================================
 // نافذة فرعية متقدمة لإدارة، إعادة تسمية، وتعديل محتوى ملفات الـ XML قبل الحقن
@@ -1924,9 +1923,3 @@ int main(int argc, char *argv[]) {
 }
 
 #include "main.moc"
-'''
-
-with open("main.cpp", "w", encoding="utf-8") as f:
-    f.write(cpp_code)
-
-print("Successfully generated full main.cpp. Lines:", len(cpp_code.splitlines()))
