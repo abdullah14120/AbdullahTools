@@ -1,4 +1,4 @@
-cpp_code = r'''#include <QApplication>
+#include <QApplication>
 #include <QMainWindow>
 #include <QWidget>
 #include <QVBoxLayout>
