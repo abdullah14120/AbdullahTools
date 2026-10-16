@@ -25,17 +25,14 @@
 #include <QButtonGroup>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QTextStream>
+#include <QRegularExpression>
 #include <QFont>
 #include <QFontDatabase>
-#include <QMouseEvent>
-#include <QRegularExpression>
-#include <QFile>
-#include <QTextStream>
-#include <QComboBox>
-// ============================================================================
-// دوال مساعدة عامة (الخطوط + بصمة الجهاز + مسار ADB الذكي)
-// ============================================================================
+
+// دالة لتحميل خط جوجل العربي المدمج وتطبيق تنعيم الحروف المطابق لواجهة Gemini
 static void setupGeminiTypography(QApplication &app) {
     QString fontsDir = QCoreApplication::applicationDirPath() + "/fonts";
     QString selectedFamily = "Segoe UI";
@@ -60,6 +57,7 @@ static void setupGeminiTypography(QApplication &app) {
     app.setFont(geminiFont);
 }
 
+// دالة لتوليد بصمة الجهاز الفريدة (HWID) الخاصة بالكمبيوتر
 static QString getMachineHWID() {
     QByteArray rawId = QSysInfo::machineUniqueId();
     if (rawId.isEmpty()) {
@@ -73,219 +71,48 @@ static QString getMachineHWID() {
         .arg(QString(hash.mid(12, 4)));
 }
 
-// باحث ذكي عن ملف adb.exe في كافة المجلدات المحتملة بجانب الأداة أو في النظام
+// دالة لتحديد مسار ملف adb.exe المدمج بجانب الأداة
 static QString getAdbExecutablePath() {
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/platform-tools/adb.exe",
-        appDir + "/adb.exe",
-        appDir + "/../platform-tools/adb.exe",
-        "C:/platform-tools/adb.exe"
-    };
-    for (const QString &path : candidates) {
-        if (QFileInfo::exists(path)) {
-            return QDir::toNativeSeparators(path);
-        }
+    QString localAdb = QCoreApplication::applicationDirPath() + "/platform-tools/adb.exe";
+    if (QFile::exists(localAdb)) {
+        return localAdb;
     }
-    return "adb.exe"; // الاعتماد على متغير البيئة PATH إن وجد
+    return "platform-tools/adb.exe";
 }
 
 // ============================================================================
-// شريط عنوان مدمج واحترافي قابل للسحب (Custom Frameless TitleBar)
-// ============================================================================
-class CustomTitleBar : public QFrame {
-    Q_OBJECT
-public:
-    CustomTitleBar(const QString &titleText, bool allowMaximize, QWidget *targetWindow)
-        : QFrame(targetWindow), m_window(targetWindow), m_allowMax(allowMaximize) {
-        setObjectName("CustomTitleBar");
-        setFixedHeight(42);
-        setLayoutDirection(Qt::RightToLeft);
-
-        setStyleSheet(R"(
-            QFrame#CustomTitleBar {
-                background-color: #0E0F10;
-                border-top-left-radius: 13px;
-                border-top-right-radius: 13px;
-                border-bottom: 1px solid #282A2C;
-            }
-            QLabel#TitleLabel {
-                color: #E3E3E3;
-                font-size: 13px;
-                font-weight: bold;
-                background: transparent;
-            }
-            QLabel#BadgeIcon {
-                background-color: #004A77;
-                color: #A8C7FA;
-                border-radius: 6px;
-                padding: 2px 8px;
-                font-size: 11px;
-                font-weight: bold;
-            }
-            QPushButton.WinCtrlBtn {
-                background-color: transparent;
-                color: #C4C7C5;
-                border: none;
-                border-radius: 6px;
-                font-family: 'Segoe UI Symbol', 'Arial';
-                font-size: 13px;
-                font-weight: bold;
-                min-width: 34px;
-                max-width: 34px;
-                min-height: 28px;
-                max-height: 28px;
-                padding: 0px;
-            }
-            QPushButton.WinCtrlBtn:hover {
-                background-color: #282A2C;
-                color: #FFFFFF;
-            }
-            QPushButton#CloseWinBtn {
-                background-color: transparent;
-                color: #C4C7C5;
-                border: none;
-                border-radius: 6px;
-                font-family: 'Segoe UI Symbol', 'Arial';
-                font-size: 13px;
-                font-weight: bold;
-                min-width: 34px;
-                max-width: 34px;
-                min-height: 28px;
-                max-height: 28px;
-                padding: 0px;
-            }
-            QPushButton#CloseWinBtn:hover {
-                background-color: #DC2626;
-                color: #FFFFFF;
-            }
-        )");
-
-        QHBoxLayout *layout = new QHBoxLayout(this);
-        layout->setContentsMargins(14, 0, 10, 0);
-        layout->setSpacing(6);
-
-        QLabel *badge = new QLabel("⚡ PRO", this);
-        badge->setObjectName("BadgeIcon");
-
-        m_titleLabel = new QLabel(titleText, this);
-        m_titleLabel->setObjectName("TitleLabel");
-
-        layout->addWidget(badge);
-        layout->addSpacing(4);
-        layout->addWidget(m_titleLabel);
-        layout->addStretch();
-
-        // أزرار التحكم بالنافذة (تصغير، تكبير، إغلاق) في أقصى اليسار
-        QPushButton *btnMin = new QPushButton("—", this);
-        btnMin->setProperty("class", "WinCtrlBtn");
-        btnMin->setToolTip("تصغير النافذة");
-        connect(btnMin, &QPushButton::clicked, m_window, &QWidget::showMinimized);
-        layout->addWidget(btnMin);
-
-        if (m_allowMax) {
-            QPushButton *btnMax = new QPushButton("▢", this);
-            btnMax->setProperty("class", "WinCtrlBtn");
-            btnMax->setToolTip("تكبير / استعادة");
-            connect(btnMax, &QPushButton::clicked, this, [=]() {
-                if (m_window->isMaximized()) m_window->showNormal();
-                else m_window->showMaximized();
-            });
-            layout->addWidget(btnMax);
-        }
-
-        QPushButton *btnClose = new QPushButton("✕", this);
-        btnClose->setObjectName("CloseWinBtn");
-        btnClose->setToolTip("إغلاق الأداة");
-        connect(btnClose, &QPushButton::clicked, this, [=]() {
-            m_window->close();
-            QApplication::quit();
-        });
-        layout->addWidget(btnClose);
-    }
-
-protected:
-    void mousePressEvent(QMouseEvent *event) override {
-        if (event->button() == Qt::LeftButton) {
-            m_dragging = true;
-            m_dragPos = event->globalPosition().toPoint() - m_window->frameGeometry().topLeft();
-            event->accept();
-        }
-    }
-
-    void mouseMoveEvent(QMouseEvent *event) override {
-        if (m_dragging && (event->buttons() & Qt::LeftButton) && !m_window->isMaximized()) {
-            m_window->move(event->globalPosition().toPoint() - m_dragPos);
-            event->accept();
-        }
-    }
-
-    void mouseReleaseEvent(QMouseEvent *event) override {
-        m_dragging = false;
-        QFrame::mouseReleaseEvent(event);
-    }
-
-    void mouseDoubleClickEvent(QMouseEvent *event) override {
-        if (m_allowMax && event->button() == Qt::LeftButton) {
-            if (m_window->isMaximized()) m_window->showNormal();
-            else m_window->showMaximized();
-        }
-    }
-
-private:
-    QWidget *m_window;
-    QLabel *m_titleLabel;
-    bool m_allowMax;
-    bool m_dragging = false;
-    QPoint m_dragPos;
-};
-
-// ============================================================================
-// 1. نافذة تسجيل الدخول والتفعيل بدون حواف تقليدية (Frameless Login Window)
+// 1. نافذة تسجيل الدخول والتفعيل (بتصميم وخط Gemini Dark)
 // ============================================================================
 class LoginWindow : public QWidget {
     Q_OBJECT
 public:
     LoginWindow(QWidget *parent = nullptr) : QWidget(parent) {
-        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint);
-        setAttribute(Qt::WA_TranslucentBackground);
-        setFixedSize(800, 530);
+        setWindowTitle("AbdullahTool Pro - بوابة التفعيل والدخول");
+        setFixedSize(780, 480);
         setLayoutDirection(Qt::RightToLeft);
 
-        QVBoxLayout *outerLayout = new QVBoxLayout(this);
-        outerLayout->setContentsMargins(0, 0, 0, 0);
-
-        // الحاوية الرئيسية ذات الحواف الدائرية والإطار الأنيق
-        QFrame *windowShell = new QFrame(this);
-        windowShell->setObjectName("WindowShell");
-        windowShell->setStyleSheet(R"(
-            QFrame#WindowShell {
-                background-color: #131314;
-                border: 1px solid #333537;
-                border-radius: 14px;
-            }
+        setStyleSheet(R"(
             QWidget {
+                background-color: #131314;
                 color: #E3E3E3;
-                font-family: 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma;
+                font-family: 'IBM Plex Sans Arabic', 'Noto Sans Arabic', 'Cairo', 'Segoe UI';
             }
             QFrame#BrandPanel {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                                             stop:0 #1B263B, stop:0.6 #1E1F20, stop:1 #131314);
-                border-radius: 14px;
+                border-radius: 16px;
                 border: 1px solid #282A2C;
             }
             QFrame#FormPanel {
                 background-color: #1E1F20;
-                border-radius: 14px;
+                border-radius: 16px;
                 border: 1px solid #282A2C;
             }
             QLineEdit {
                 background-color: #131314;
                 border: 1px solid #333537;
                 border-radius: 10px;
-                min-height: 40px;
-                max-height: 40px;
-                padding: 0px 14px 3px 14px;
+                padding: 11px 14px;
                 color: #E3E3E3;
                 font-size: 13px;
             }
@@ -298,9 +125,7 @@ public:
                 color: #062E6F;
                 border: none;
                 border-radius: 10px;
-                min-height: 44px;
-                max-height: 44px;
-                padding: 0px 16px 4px 16px;
+                padding: 12px;
                 font-size: 14px;
                 font-weight: bold;
             }
@@ -310,11 +135,9 @@ public:
             QPushButton#TrialBtn {
                 background-color: #282A2C;
                 color: #A8C7FA;
-                border: 1px solid #3C4043;
+                border: 1px solid #333537;
                 border-radius: 10px;
-                min-height: 44px;
-                max-height: 44px;
-                padding: 0px 16px 4px 16px;
+                padding: 11px;
                 font-size: 13px;
                 font-weight: bold;
             }
@@ -325,11 +148,9 @@ public:
             QPushButton#CopyBtn {
                 background-color: #282A2C;
                 color: #E3E3E3;
-                border: 1px solid #3C4043;
+                border: 1px solid #333537;
                 border-radius: 8px;
-                min-height: 40px;
-                max-height: 40px;
-                padding: 0px 16px 3px 16px;
+                padding: 8px 14px;
                 font-size: 12px;
                 font-weight: bold;
             }
@@ -339,28 +160,19 @@ public:
             QCheckBox {
                 color: #C4C7C5;
                 font-size: 12px;
-                min-height: 24px;
             }
         )");
 
-        QVBoxLayout *shellLayout = new QVBoxLayout(windowShell);
-        shellLayout->setContentsMargins(0, 0, 0, 0);
-        shellLayout->setSpacing(0);
-
-        // إضافة شريط العنوان المدمج الجديد
-        CustomTitleBar *titleBar = new CustomTitleBar("AbdullahTool Pro — بوابة التفعيل والدخول", false, this);
-        shellLayout->addWidget(titleBar);
-
-        QHBoxLayout *contentLayout = new QHBoxLayout();
-        contentLayout->setContentsMargins(18, 16, 18, 18);
-        contentLayout->setSpacing(16);
+        QHBoxLayout *rootLayout = new QHBoxLayout(this);
+        rootLayout->setContentsMargins(18, 18, 18, 18);
+        rootLayout->setSpacing(16);
 
         // --- اللوحة الجانبية للهوية ---
-        QFrame *brandPanel = new QFrame(windowShell);
+        QFrame *brandPanel = new QFrame(this);
         brandPanel->setObjectName("BrandPanel");
         brandPanel->setFixedWidth(295);
         QVBoxLayout *brandLayout = new QVBoxLayout(brandPanel);
-        brandLayout->setContentsMargins(22, 26, 22, 22);
+        brandLayout->setContentsMargins(24, 30, 24, 24);
 
         QLabel *logoBadge = new QLabel("✨ ABDULLAH TOOL", brandPanel);
         logoBadge->setStyleSheet("font-size: 21px; font-weight: bold; color: #A8C7FA; background: transparent;");
@@ -370,11 +182,11 @@ public:
 
         QLabel *descLabel = new QLabel(
             "الأداة الاحترافية المتكاملة لإدارة وصيانة أجهزة الأندرويد، "
-            "تنفيذ أوامر النظام المتقدمة، إدارة التطبيقات، ونقل البيانات بسرعة وموثوقية عالية.",
+            "تنفيذ أوامر النظام المتقدمة، إدارة حزم البيانات وملفات النسخ الاحتياطي، ونقل الملفات السريع عبر السلك واللاسلكي.",
             brandPanel
         );
         descLabel->setWordWrap(true);
-        descLabel->setStyleSheet("font-size: 13px; color: #C4C7C5; line-height: 1.7; margin-top: 16px; background: transparent;");
+        descLabel->setStyleSheet("font-size: 13px; color: #C4C7C5; line-height: 1.7; margin-top: 18px; background: transparent;");
 
         brandLayout->addWidget(logoBadge);
         brandLayout->addWidget(editionLabel);
@@ -391,11 +203,11 @@ public:
         brandLayout->addWidget(securityNote);
 
         // --- لوحة نموذج الدخول ---
-        QFrame *formPanel = new QFrame(windowShell);
+        QFrame *formPanel = new QFrame(this);
         formPanel->setObjectName("FormPanel");
         QVBoxLayout *formLayout = new QVBoxLayout(formPanel);
-        formLayout->setContentsMargins(26, 22, 26, 20);
-        formLayout->setSpacing(10);
+        formLayout->setContentsMargins(28, 28, 28, 24);
+        formLayout->setSpacing(13);
 
         QLabel *welcomeTitle = new QLabel("تسجيل الدخول وتفعيل الرخصة", formPanel);
         welcomeTitle->setStyleSheet("font-size: 19px; font-weight: bold; color: #E3E3E3; background: transparent;");
@@ -409,25 +221,22 @@ public:
         QHBoxLayout *hwidLayout = new QHBoxLayout();
         hwidEdit = new QLineEdit(getMachineHWID(), formPanel);
         hwidEdit->setReadOnly(true);
-        hwidEdit->setAlignment(Qt::AlignCenter);
-        hwidEdit->setStyleSheet("background-color: #131314; color: #FCD34D; font-family: Consolas; font-size: 14px; font-weight: bold;");
+        hwidEdit->setStyleSheet("background-color: #131314; color: #FCD34D; font-family: Consolas; font-weight: bold;");
 
         QPushButton *copyHwidBtn = new QPushButton("نسخ المعرّف", formPanel);
         copyHwidBtn->setObjectName("CopyBtn");
-        copyHwidBtn->setCursor(Qt::PointingHandCursor);
         connect(copyHwidBtn, &QPushButton::clicked, this, [=]() {
             QGuiApplication::clipboard()->setText(hwidEdit->text());
             QMessageBox::information(this, "تم النسخ", "تم نسخ معرّف الجهاز (HWID) إلى الحافظة بنجاح.");
         });
-        hwidLayout->addWidget(hwidEdit, 1);
+        hwidLayout->addWidget(hwidEdit);
         hwidLayout->addWidget(copyHwidBtn);
 
         QLabel *keyTitle = new QLabel("كود الاشتراك (License Key):", formPanel);
         keyTitle->setStyleSheet("font-size: 12px; color: #C4C7C5; font-weight: 600; background: transparent;");
 
         codeLineEdit = new QLineEdit(formPanel);
-        codeLineEdit->setPlaceholderText("أدخل الكود هنا (مثال: PRO-2026-VIP)");
-        codeLineEdit->setAlignment(Qt::AlignCenter);
+        codeLineEdit->setPlaceholderText("XXXX-XXXX-XXXX-XXXX (مثال: PRO-2026-VIP)");
 
         rememberCheck = new QCheckBox("حفظ كود الاشتراك تلقائياً على هذا الكمبيوتر", formPanel);
         rememberCheck->setChecked(true);
@@ -437,11 +246,11 @@ public:
             codeLineEdit->setText(settings.value("SavedLicenseKey").toString());
         }
 
-        QPushButton *loginBtn = new QPushButton("🔓  تفعيل الرخصة والدخول للأداة", formPanel);
+        QPushButton *loginBtn = new QPushButton("تفعيل الرخصة والدخول للأداة", formPanel);
         loginBtn->setObjectName("PrimaryBtn");
         loginBtn->setCursor(Qt::PointingHandCursor);
 
-        QPushButton *trialBtn = new QPushButton("⏱️  تفعيل التجربة المجانية (لمدة 48 ساعة)", formPanel);
+        QPushButton *trialBtn = new QPushButton("تفعيل التجربة المجانية (لمدة 48 ساعة)", formPanel);
         trialBtn->setObjectName("TrialBtn");
         trialBtn->setCursor(Qt::PointingHandCursor);
 
@@ -456,17 +265,14 @@ public:
         formLayout->addWidget(keyTitle);
         formLayout->addWidget(codeLineEdit);
         formLayout->addWidget(rememberCheck);
-        formLayout->addSpacing(4);
+        formLayout->addSpacing(6);
         formLayout->addWidget(loginBtn);
         formLayout->addWidget(trialBtn);
         formLayout->addStretch();
         formLayout->addWidget(statusFeedback);
 
-        contentLayout->addWidget(brandPanel);
-        contentLayout->addWidget(formPanel, 1);
-
-        shellLayout->addLayout(contentLayout, 1);
-        outerLayout->addWidget(windowShell);
+        rootLayout->addWidget(brandPanel);
+        rootLayout->addWidget(formPanel, 1);
 
         connect(loginBtn, &QPushButton::clicked, this, &LoginWindow::handleLogin);
         connect(trialBtn, &QPushButton::clicked, this, &LoginWindow::handleTrial);
@@ -486,9 +292,9 @@ private slots:
                 settings.remove("SavedLicenseKey");
             }
             emit loginSuccess("اشتراك VIP مفعل");
-            hide();
+            close();
         } else {
-            QMessageBox::critical(this, "فشل التحقق", "كود الاشتراك غير صالح أو منتهي الصلاحية.\nيرجى التأكد من الكود (مثال: PRO-2026-VIP).");
+            QMessageBox::critical(this, "فشل التحقق", "كود الاشتراك غير صالح أو منتهي الصلاحية.\nيرجى التأكد من الكود أو التواصل مع الدعم الفني.");
         }
     }
 
@@ -500,15 +306,15 @@ private slots:
             QDateTime expiry = now.addDays(2);
             settings.setValue("TrialExpiryDate", expiry);
             emit loginSuccess("نسخة تجريبية (متبقي 48 ساعة)");
-            hide();
+            close();
             return;
         }
 
         QDateTime expiry = settings.value("TrialExpiryDate").toDateTime();
         if (now < expiry) {
-            qint64 hoursLeft = qMax<qint64>(1, now.secsTo(expiry) / 3600);
+            qint64 hoursLeft = now.secsTo(expiry) / 3600;
             emit loginSuccess(QString("نسخة تجريبية (متبقي %1 ساعة)").arg(hoursLeft));
-            hide();
+            close();
         } else {
             QMessageBox::warning(this, "انتهت الفترة التجريبية",
                 "عذراً، انتهت فترة التجربة المجانية (48 ساعة) على هذا الجهاز.\nيرجى إدخال كود اشتراك رسمي للمتابعة.");
@@ -523,34 +329,22 @@ private:
 };
 
 // ============================================================================
-// 2. الواجهة الرئيسية للأداة بشريط عنوان مدمج وفحص ADB فوري
+// 2. الواجهة الرئيسية للأداة (بألوان وخطوط Gemini Dark UI)
 // ============================================================================
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     MainWindow(QWidget *parent = nullptr) : QMainWindow(parent) {
-        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint);
-        setAttribute(Qt::WA_TranslucentBackground);
+        setWindowTitle("AbdullahTool Pro v2.2 - النظام المتكامل لإدارة أجهزة الأندرويد");
         resize(1160, 760);
         setMinimumSize(1000, 680);
         setLayoutDirection(Qt::RightToLeft);
 
-        QWidget *outerCentral = new QWidget(this);
-        setCentralWidget(outerCentral);
-        QVBoxLayout *outerLayout = new QVBoxLayout(outerCentral);
-        outerLayout->setContentsMargins(0, 0, 0, 0);
-
-        QFrame *windowShell = new QFrame(outerCentral);
-        windowShell->setObjectName("MainShell");
-        windowShell->setStyleSheet(R"(
-            QFrame#MainShell {
+        setStyleSheet(R"(
+            QMainWindow, QWidget {
                 background-color: #131314;
-                border: 1px solid #333537;
-                border-radius: 14px;
-            }
-            QWidget {
                 color: #E3E3E3;
-                font-family: 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma;
+                font-family: 'IBM Plex Sans Arabic', 'Noto Sans Arabic', 'Cairo', 'Segoe UI';
             }
             QFrame#TopBar {
                 background-color: #1E1F20;
@@ -559,7 +353,6 @@ public:
             QFrame#SideBar {
                 background-color: #1E1F20;
                 border-left: 1px solid #282A2C;
-                border-bottom-right-radius: 13px;
             }
             QFrame#Card {
                 background-color: #1E1F20;
@@ -575,9 +368,7 @@ public:
                 background-color: transparent;
                 color: #C4C7C5;
                 text-align: right;
-                min-height: 42px;
-                max-height: 42px;
-                padding: 0px 16px 3px 16px;
+                padding: 13px 16px;
                 border-radius: 20px;
                 font-size: 13px;
                 font-weight: 600;
@@ -597,9 +388,7 @@ public:
                 color: #062E6F;
                 border: none;
                 border-radius: 10px;
-                min-height: 40px;
-                max-height: 40px;
-                padding: 0px 18px 4px 18px;
+                padding: 10px 18px;
                 font-size: 13px;
                 font-weight: bold;
             }
@@ -609,26 +398,22 @@ public:
             QPushButton.SecondaryBtn {
                 background-color: #282A2C;
                 color: #E3E3E3;
-                border: 1px solid #3C4043;
+                border: 1px solid #333537;
                 border-radius: 10px;
-                min-height: 38px;
-                max-height: 38px;
-                padding: 0px 15px 3px 15px;
+                padding: 9px 15px;
                 font-size: 12px;
                 font-weight: 600;
             }
             QPushButton.SecondaryBtn:hover {
                 background-color: #333537;
-                border: 1px solid #5F6368;
+                border: 1px solid #444746;
             }
             QPushButton.DangerBtn {
                 background-color: #3C1919;
                 color: #F2B8B5;
                 border: 1px solid #601410;
                 border-radius: 10px;
-                min-height: 38px;
-                max-height: 38px;
-                padding: 0px 15px 3px 15px;
+                padding: 9px 15px;
                 font-size: 12px;
                 font-weight: bold;
             }
@@ -640,9 +425,7 @@ public:
                 background-color: #131314;
                 border: 1px solid #333537;
                 border-radius: 10px;
-                min-height: 38px;
-                max-height: 38px;
-                padding: 0px 14px 3px 14px;
+                padding: 10px 14px;
                 color: #E3E3E3;
                 font-size: 13px;
             }
@@ -664,18 +447,14 @@ public:
             }
         )");
 
-        QVBoxLayout *rootLayout = new QVBoxLayout(windowShell);
+        QWidget *central = new QWidget(this);
+        setCentralWidget(central);
+        QVBoxLayout *rootLayout = new QVBoxLayout(central);
         rootLayout->setContentsMargins(0, 0, 0, 0);
         rootLayout->setSpacing(0);
 
-        // 1. شريط العنوان المدمج مع أزرار الإغلاق والتكبير والتصغير
-        CustomTitleBar *titleBar = new CustomTitleBar("AbdullahTool Pro v2.2 — النظام المتكامل لإدارة وصيانة أجهزة الأندرويد", true, this);
-        rootLayout->addWidget(titleBar);
-
-        // 2. شريط حالة الاتصال السريع
         rootLayout->addWidget(createTopBar());
 
-        // 3. منطقة العمل الوسطى
         QHBoxLayout *bodyLayout = new QHBoxLayout();
         bodyLayout->setContentsMargins(0, 0, 0, 0);
         bodyLayout->setSpacing(0);
@@ -683,47 +462,32 @@ public:
         bodyLayout->addWidget(createSidebar());
 
         QVBoxLayout *workAreaLayout = new QVBoxLayout();
-        workAreaLayout->setContentsMargins(18, 16, 18, 16);
+        workAreaLayout->setContentsMargins(18, 18, 18, 18);
         workAreaLayout->setSpacing(14);
 
-        pagesStack = new QStackedWidget(windowShell);
-        pagesStack->addWidget(createDashboardPage());
-        pagesStack->addWidget(createAppManagerPage());
-        pagesStack->addWidget(createFileTransferPage());
-        pagesStack->addWidget(new AbExtractorPage(this));
-        pagesStack->addWidget(createShellTerminalPage());
+        pagesStack = new QStackedWidget(this);
+        pagesStack->addWidget(createDashboardPage());      // 0: معلومات الهاتف والربط اللاسلكي
+        pagesStack->addWidget(createAppManagerPage());     // 1: مدير التطبيقات
+        pagesStack->addWidget(createFileTransferPage());   // 2: نقل وسحب الملفات
+        pagesStack->addWidget(createBackupAndDataPage());  // 3: النسخ الاحتياطي (.ab) وبيانات الحزم
+        pagesStack->addWidget(createShellTerminalPage());  // 4: أوامر Shell المتقدمة
 
         workAreaLayout->addWidget(pagesStack, 3);
         workAreaLayout->addWidget(createConsolePanel(), 2);
 
         bodyLayout->addLayout(workAreaLayout, 1);
         rootLayout->addLayout(bodyLayout, 1);
-        outerLayout->addWidget(windowShell);
 
-        // رادار فحص الاتصال التلقائي كل ثانيتين ونصف
         deviceTimer = new QTimer(this);
-        connect(deviceTimer, &QTimer::timeout, this, [=]() {
-            checkDeviceConnection(false);
-        });
+        connect(deviceTimer, &QTimer::timeout, this, &MainWindow::checkDeviceSilently);
+        deviceTimer->start(3500);
+
+        appendLog("تم تشغيل AbdullahTool Pro v2.2 بواجهة وخط Gemini بنجاح.", "SUCCESS");
+        checkDeviceSilently();
     }
 
-    void initializeAdbSession(const QString &licenseText) {
-        licenseBadge->setText("🛡️ " + licenseText);
-        QString adbPath = getAdbExecutablePath();
-        appendLog("مسار محرك ADB المعتمد: " + adbPath, "INFO");
-
-        if (!QFileInfo::exists(adbPath) && adbPath == "adb.exe") {
-            appendLog("تحذير: لم يتم العثور على مجلد platform-tools بجانب الأداة! تأكد من فك الضغط عن كامل المجلد.", "ERROR");
-        } else {
-            appendLog("جاري تهيئة خادم ADB وفحص المنافذ المتصلة...", "INFO");
-            QProcess *startSrv = new QProcess(this);
-            connect(startSrv, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
-                checkDeviceConnection(true);
-                deviceTimer->start(2500);
-                startSrv->deleteLater();
-            });
-            startSrv->start(adbPath, {"start-server"});
-        }
+    void setLicenseBadgeText(const QString &text) {
+        licenseBadge->setText("🛡️ " + text);
     }
 
 private:
@@ -733,12 +497,12 @@ private:
     QTextEdit *consoleBox;
     QProgressBar *operationProgress;
     QTimer *deviceTimer;
-    QString lastConnectedSerial;
 
     QLabel *valModel;
     QLabel *valAndroid;
     QLabel *valSerial;
     QProgressBar *batteryBar;
+    QLineEdit *wifiIpInput;
 
     QLineEdit *apkPathInput;
     QCheckBox *chkReplaceApk;
@@ -750,31 +514,36 @@ private:
     QLineEdit *pullRemoteInput;
     QLineEdit *pullLocalInput;
 
+    // حقول صفحة النسخ الاحتياطي وملفات .ab وبيانات الحزم
+    QLineEdit *backupPkgInput;
+    QLineEdit *abFileInput;
+    QLineEdit *targetOwnPkgInput;
+
     QLineEdit *customShellInput;
 
     QWidget* createTopBar() {
         QFrame *topBar = new QFrame(this);
         topBar->setObjectName("TopBar");
-        topBar->setFixedHeight(60);
+        topBar->setFixedHeight(64);
 
         QHBoxLayout *layout = new QHBoxLayout(topBar);
         layout->setContentsMargins(20, 0, 20, 0);
 
-        QLabel *brandTitle = new QLabel("✨ لوحة العمليات الذكية", topBar);
-        brandTitle->setStyleSheet("font-size: 16px; font-weight: bold; color: #A8C7FA;");
+        QLabel *brandTitle = new QLabel("✨ ABDULLAH TOOL PRO", topBar);
+        brandTitle->setStyleSheet("font-size: 18px; font-weight: bold; color: #A8C7FA;");
 
         licenseBadge = new QLabel("🛡️ اشتراك مفعل", topBar);
-        licenseBadge->setStyleSheet("background-color: #004A77; color: #C2E7FF; padding: 5px 14px; border-radius: 14px; font-size: 12px; font-weight: bold;");
+        licenseBadge->setStyleSheet("background-color: #004A77; color: #C2E7FF; padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: bold;");
 
-        connectionBadge = new QLabel("● جاري فحص اتصال ADB...", topBar);
-        connectionBadge->setStyleSheet("background-color: #282A2C; color: #FCD34D; padding: 5px 14px; border-radius: 14px; font-size: 12px; font-weight: bold;");
+        connectionBadge = new QLabel("● جاري البحث عن جهاز أندرويد متصل...", topBar);
+        connectionBadge->setStyleSheet("background-color: #282A2C; color: #FCD34D; padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: bold;");
 
         QPushButton *refreshBtn = new QPushButton("🔄 فحص الاتصال الآن", topBar);
-        refreshBtn->setProperty("class", "ActionBtn");
-        refreshBtn->setCursor(Qt::PointingHandCursor);
+        refreshBtn->setProperty("class", "SecondaryBtn");
         connect(refreshBtn, &QPushButton::clicked, this, [=]() {
-            appendLog("بدء الفحص اليدوي الفوري للأجهزة المتصلة عبر ADB...", "INFO");
-            checkDeviceConnection(true);
+            appendLog("جاري فحص منافذ USB والشبكة للأجهزة المتصلة عبر ADB...", "INFO");
+            checkDeviceSilently();
+            readFullDeviceInfo();
         });
 
         layout->addWidget(brandTitle);
@@ -782,7 +551,7 @@ private:
         layout->addWidget(licenseBadge);
         layout->addStretch();
         layout->addWidget(connectionBadge);
-        layout->addSpacing(10);
+        layout->addSpacing(8);
         layout->addWidget(refreshBtn);
 
         return topBar;
@@ -791,13 +560,13 @@ private:
     QWidget* createSidebar() {
         QFrame *sidebar = new QFrame(this);
         sidebar->setObjectName("SideBar");
-        sidebar->setFixedWidth(245);
+        sidebar->setFixedWidth(255);
 
         QVBoxLayout *layout = new QVBoxLayout(sidebar);
         layout->setContentsMargins(14, 18, 14, 18);
         layout->setSpacing(8);
 
-        QLabel *menuHeader = new QLabel("الأقسام والمهام", sidebar);
+        QLabel *menuHeader = new QLabel("قائمة المهام الرئيسية", sidebar);
         menuHeader->setStyleSheet("color: #8E918F; font-size: 12px; font-weight: bold; padding-right: 10px; margin-bottom: 4px;");
         layout->addWidget(menuHeader);
 
@@ -806,10 +575,10 @@ private:
 
         struct NavItem { QString title; int index; };
         QList<NavItem> items = {
-            {"📊  معلومات الهاتف والتحكم", 0},
+            {"📊  معلومات الهاتف والربط", 0},
             {"📦  مدير التطبيقات (APK)", 1},
             {"📁  نقل وسحب الملفات", 2},
-            {"📂  فك وتعديل ملفات .ab", 3},
+            {"🗄️  النسخ الاحتياطي وملفات .ab", 3},
             {"💻  أوامر Shell المتقدمة", 4}
         };
 
@@ -831,16 +600,14 @@ private:
 
         QPushButton *restartAdbBtn = new QPushButton("🛠️ إعادة تشغيل خادم ADB", sidebar);
         restartAdbBtn->setProperty("class", "SecondaryBtn");
-        restartAdbBtn->setCursor(Qt::PointingHandCursor);
         connect(restartAdbBtn, &QPushButton::clicked, this, [=]() {
-            appendLog("جاري إعادة تشغيل خادم ADB لتحديث تعريفات المنفذ...", "WARN");
-            lastConnectedSerial.clear();
-            runAdbCommand({"kill-server"}, "تم إيقاف خادم ADB القديم.");
-            runAdbCommand({"start-server"}, "تم تشغيل خادم ADB من جديد.");
+            appendLog("جاري إعادة تشغيل خادم ADB...", "WARN");
+            runAdbCommand({"kill-server"}, "تم إيقاف خادم ADB مؤقتاً.");
+            runAdbCommand({"start-server"}, "تم تشغيل خادم ADB بنجاح.");
         });
         layout->addWidget(restartAdbBtn);
 
-        QLabel *footerVer = new QLabel("AbdullahTool • Gemini Dark v2.2", sidebar);
+        QLabel *footerVer = new QLabel("AbdullahTool • Gemini Dark UI", sidebar);
         footerVer->setAlignment(Qt::AlignCenter);
         footerVer->setStyleSheet("color: #8E918F; font-size: 11px; margin-top: 6px;");
         layout->addWidget(footerVer);
@@ -848,6 +615,7 @@ private:
         return sidebar;
     }
 
+    // --- الصفحة 0: معلومات الهاتف، أوضاع الإقلاع، والربط اللاسلكي ---
     QWidget* createDashboardPage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
@@ -856,12 +624,11 @@ private:
         layout->setSpacing(14);
 
         QHBoxLayout *headerRow = new QHBoxLayout();
-        QLabel *title = new QLabel("📊 بيانات الجهاز المتصل والتحكم في أوضاع التشغيل", page);
+        QLabel *title = new QLabel("📊 بيانات الجهاز المتصل، الربط اللاسلكي، وأوضاع التشغيل", page);
         title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
 
         QPushButton *readInfoBtn = new QPushButton("🔍 قراءة كافة بيانات الهاتف الآن", page);
         readInfoBtn->setProperty("class", "ActionBtn");
-        readInfoBtn->setCursor(Qt::PointingHandCursor);
         connect(readInfoBtn, &QPushButton::clicked, this, &MainWindow::readFullDeviceInfo);
 
         headerRow->addWidget(title);
@@ -879,16 +646,16 @@ private:
             v->setContentsMargins(16, 12, 16, 12);
             QLabel *lbl = new QLabel(label, box);
             lbl->setStyleSheet("color: #C4C7C5; font-size: 12px;");
-            valueLabel = new QLabel("بانتظار توصيل الهاتف...", box);
+            valueLabel = new QLabel("بانتظار قراءة البيانات...", box);
             valueLabel->setStyleSheet("color: #A8C7FA; font-size: 15px; font-weight: bold;");
             v->addWidget(lbl);
             v->addWidget(valueLabel);
             return box;
         };
 
-        grid->addWidget(createStatBox("📱 طراز وموديل الهاتف (Brand & Model):", valModel), 0, 0);
-        grid->addWidget(createStatBox("🤖 إصدار نظام الأندرويد (Android Version):", valAndroid), 0, 1);
-        grid->addWidget(createStatBox("🔢 الرقم التسلسلي (Serial ID):", valSerial), 1, 0);
+        grid->addWidget(createStatBox("📱 طراز وموديل الهاتف (Model & Brand):", valModel), 0, 0);
+        grid->addWidget(createStatBox("🤖 إصدار نظام الأندرويد (Android Release):", valAndroid), 0, 1);
+        grid->addWidget(createStatBox("🔢 الرقم التسلسلي (Serial Number):", valSerial), 1, 0);
 
         QFrame *batCard = new QFrame(page);
         batCard->setObjectName("StatCard");
@@ -906,8 +673,42 @@ private:
 
         layout->addLayout(grid);
 
+        // قسم الربط اللاسلكي للأجهزة ذات منفذ الشحن المعطل
+        QLabel *wifiTitle = new QLabel("📡 الربط اللاسلكي عبر الشبكة (ADB over Wi-Fi للأجهزة ذات منفذ الشحن المعطل):", page);
+        wifiTitle->setStyleSheet("font-size: 13px; font-weight: bold; color: #A8C7FA; margin-top: 4px;");
+        layout->addWidget(wifiTitle);
+
+        QHBoxLayout *wifiRow = new QHBoxLayout();
+        wifiIpInput = new QLineEdit(page);
+        wifiIpInput->setPlaceholderText("أدخل عنوان IP والمنفذ للهاتف (مثال: 192.168.1.15:5555)");
+
+        QPushButton *btnWifiConnect = new QPushButton("🔗 اتصال لاسلكي (Connect)", page);
+        btnWifiConnect->setProperty("class", "ActionBtn");
+        connect(btnWifiConnect, &QPushButton::clicked, this, [=]() {
+            QString addr = wifiIpInput->text().trimmed();
+            if (addr.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "يرجى كتابة عنوان IP والمنفذ أولاً!");
+                return;
+            }
+            appendLog("جاري الربط اللاسلكي بالهاتف: " + addr, "INFO");
+            runAdbCommand({"connect", addr}, "تم إرسال طلب الربط اللاسلكي.");
+        });
+
+        QPushButton *btnTcpip = new QPushButton("⚙️ تفعيل منفذ 5555", page);
+        btnTcpip->setProperty("class", "SecondaryBtn");
+        connect(btnTcpip, &QPushButton::clicked, this, [=]() {
+            appendLog("تفعيل وضع الاتصال اللاسلكي عبر المنفذ 5555...", "INFO");
+            runAdbCommand({"tcpip", "5555"}, "تم فتح المنفذ 5555 بنجاح.");
+        });
+
+        wifiRow->addWidget(wifiIpInput, 1);
+        wifiRow->addWidget(btnWifiConnect);
+        wifiRow->addWidget(btnTcpip);
+        layout->addLayout(wifiRow);
+
+        // قسم أوضاع إعادة التشغيل
         QLabel *rebootTitle = new QLabel("⚡ التحكم السريع في أوضاع الإقلاع (Reboot Modes):", page);
-        rebootTitle->setStyleSheet("font-size: 14px; font-weight: bold; color: #E3E3E3; margin-top: 6px;");
+        rebootTitle->setStyleSheet("font-size: 13px; font-weight: bold; color: #E3E3E3; margin-top: 4px;");
         layout->addWidget(rebootTitle);
 
         QHBoxLayout *rebootLayout = new QHBoxLayout();
@@ -916,17 +717,16 @@ private:
         auto addRebootBtn = [&](const QString &text, const QString &mode, const QString &msg) {
             QPushButton *btn = new QPushButton(text, page);
             btn->setProperty("class", "SecondaryBtn");
-            btn->setCursor(Qt::PointingHandCursor);
             connect(btn, &QPushButton::clicked, this, [=]() {
                 appendLog(msg, "WARN");
                 QStringList args = {"reboot"};
                 if (!mode.isEmpty()) args << mode;
-                runAdbCommand(args, "تم إرسال أمر إعادة التشغيل إلى الهاتف.");
+                runAdbCommand(args, "تم إرسال أمر إعادة التشغيل بنجاح.");
             });
             rebootLayout->addWidget(btn);
         };
 
-        addRebootBtn("🔄 إعادة تشغيل عادي", "", "إرسال أمر إعادة تشغيل للوضع العادي...");
+        addRebootBtn("🔄 إعادة تشغيل عادي (Normal)", "", "إرسال أمر إعادة تشغيل للوضع العادي...");
         addRebootBtn("🛠️ وضع الريكفري (Recovery)", "recovery", "تحويل الهاتف إلى وضع Recovery...");
         addRebootBtn("⚡ وضع البوتلودر (Fastboot)", "bootloader", "تحويل الهاتف إلى وضع Fastboot...");
         addRebootBtn("📥 وضع الداونلود (Download)", "download", "تحويل الهاتف إلى وضع Download...");
@@ -936,11 +736,12 @@ private:
         return page;
     }
 
+    // --- الصفحة 1: مدير التطبيقات ---
     QWidget* createAppManagerPage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
         QVBoxLayout *layout = new QVBoxLayout(page);
-        layout->setContentsMargins(22, 20, 22, 20);
+        layout->setContentsMargins(22, 22, 22, 22);
         layout->setSpacing(14);
 
         QLabel *title = new QLabel("📦 تثبيت ملفات APK وإدارة تطبيقات الهاتف", page);
@@ -957,7 +758,6 @@ private:
 
         QPushButton *browseApkBtn = new QPushButton("📂 استعراض...", page);
         browseApkBtn->setProperty("class", "SecondaryBtn");
-        browseApkBtn->setCursor(Qt::PointingHandCursor);
         connect(browseApkBtn, &QPushButton::clicked, this, [=]() {
             QString file = QFileDialog::getOpenFileName(this, "اختر ملف APK", "", "Android Package (*.apk)");
             if (!file.isEmpty()) apkPathInput->setText(file);
@@ -965,7 +765,6 @@ private:
 
         QPushButton *installNowBtn = new QPushButton("⬇️ تثبيت التطبيق الآن", page);
         installNowBtn->setProperty("class", "ActionBtn");
-        installNowBtn->setCursor(Qt::PointingHandCursor);
         connect(installNowBtn, &QPushButton::clicked, this, [=]() {
             QString path = apkPathInput->text().trimmed();
             if (path.isEmpty()) {
@@ -997,7 +796,7 @@ private:
         layout->addLayout(optsRow);
 
         QLabel *pkgTitle = new QLabel("🗑️ إدارة الحزم وحذف تطبيقات النظام (Debloater):", page);
-        pkgTitle->setStyleSheet("font-size: 14px; font-weight: bold; color: #E3E3E3; margin-top: 10px;");
+        pkgTitle->setStyleSheet("font-size: 14px; font-weight: bold; color: #E3E3E3; margin-top: 12px;");
         layout->addWidget(pkgTitle);
 
         QHBoxLayout *pkgRow = new QHBoxLayout();
@@ -1006,7 +805,6 @@ private:
 
         QPushButton *listPkgsBtn = new QPushButton("📋 عرض حزم الهاتف", page);
         listPkgsBtn->setProperty("class", "SecondaryBtn");
-        listPkgsBtn->setCursor(Qt::PointingHandCursor);
         connect(listPkgsBtn, &QPushButton::clicked, this, [=]() {
             appendLog("جاري جلب قائمة الحزم المثبتة على الهاتف...", "INFO");
             runAdbCommand({"shell", "pm", "list", "packages", "-3"}, "تم عرض حزم التطبيقات.");
@@ -1014,7 +812,6 @@ private:
 
         QPushButton *uninstallBtn = new QPushButton("🗑️ حذف لمستخدم النظام (User 0)", page);
         uninstallBtn->setProperty("class", "DangerBtn");
-        uninstallBtn->setCursor(Qt::PointingHandCursor);
         connect(uninstallBtn, &QPushButton::clicked, this, [=]() {
             QString pkg = pkgNameInput->text().trimmed();
             if (pkg.isEmpty()) {
@@ -1034,12 +831,13 @@ private:
         return page;
     }
 
+    // --- الصفحة 2: استوديو نقل الملفات ---
     QWidget* createFileTransferPage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
         QVBoxLayout *layout = new QVBoxLayout(page);
-        layout->setContentsMargins(22, 20, 22, 20);
-        layout->setSpacing(14);
+        layout->setContentsMargins(22, 22, 22, 22);
+        layout->setSpacing(16);
 
         QLabel *title = new QLabel("📁 استوديو نقل الملفات بين الكمبيوتر والأندرويد (Push & Pull)", page);
         title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
@@ -1055,7 +853,6 @@ private:
 
         QPushButton *browsePushBtn = new QPushButton("اختيار ملف...", page);
         browsePushBtn->setProperty("class", "SecondaryBtn");
-        browsePushBtn->setCursor(Qt::PointingHandCursor);
         connect(browsePushBtn, &QPushButton::clicked, this, [=]() {
             QString f = QFileDialog::getOpenFileName(this, "اختر ملفاً لإرساله للهاتف");
             if (!f.isEmpty()) pushLocalInput->setText(f);
@@ -1064,7 +861,6 @@ private:
         pushRemoteInput = new QLineEdit("/sdcard/Download/", page);
         QPushButton *doPushBtn = new QPushButton("🚀 إرسال للهاتف", page);
         doPushBtn->setProperty("class", "ActionBtn");
-        doPushBtn->setCursor(Qt::PointingHandCursor);
         connect(doPushBtn, &QPushButton::clicked, this, [=]() {
             if (pushLocalInput->text().isEmpty() || pushRemoteInput->text().isEmpty()) {
                 QMessageBox::warning(this, "تنبيه", "يرجى تحديد ملف الكمبيوتر ومسار الهاتف!");
@@ -1081,7 +877,7 @@ private:
         layout->addLayout(pushRow);
 
         QLabel *pullTitle = new QLabel("⬇️ ثانياً: سحب ملف أو مجلد من الهاتف إلى الكمبيوتر (ADB Pull)", page);
-        pullTitle->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold; margin-top: 8px;");
+        pullTitle->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold; margin-top: 10px;");
         layout->addWidget(pullTitle);
 
         QHBoxLayout *pullRow = new QHBoxLayout();
@@ -1090,7 +886,6 @@ private:
 
         QPushButton *browsePullBtn = new QPushButton("مجلد الحفظ...", page);
         browsePullBtn->setProperty("class", "SecondaryBtn");
-        browsePullBtn->setCursor(Qt::PointingHandCursor);
         connect(browsePullBtn, &QPushButton::clicked, this, [=]() {
             QString dir = QFileDialog::getExistingDirectory(this, "اختر مجلد الحفظ على الكمبيوتر");
             if (!dir.isEmpty()) pullLocalInput->setText(dir);
@@ -1098,7 +893,6 @@ private:
 
         QPushButton *doPullBtn = new QPushButton("📥 سحب للكمبيوتر", page);
         doPullBtn->setProperty("class", "ActionBtn");
-        doPullBtn->setCursor(Qt::PointingHandCursor);
         connect(doPullBtn, &QPushButton::clicked, this, [=]() {
             if (pullRemoteInput->text().isEmpty() || pullLocalInput->text().isEmpty()) {
                 QMessageBox::warning(this, "تنبيه", "يرجى تحديد مسار الهاتف ومجلد الكمبيوتر!");
@@ -1118,11 +912,94 @@ private:
         return page;
     }
 
-    QWidget* createShellTerminalPage() {
+    // --- الصفحة 3: النسخ الاحتياطي وملفات (.ab) وحقن بيانات الحزم ---
+    QWidget* createBackupAndDataPage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
         QVBoxLayout *layout = new QVBoxLayout(page);
         layout->setContentsMargins(22, 20, 22, 20);
+        layout->setSpacing(14);
+
+        QLabel *title = new QLabel("🗄️ إدارة النسخ الاحتياطي (.ab)، فك التشفير إلى (.tar)، وحقن بيانات الحزم", page);
+        title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
+        layout->addWidget(title);
+
+        // 1. أخذ نسخة احتياطية لحزمة بصيغة .ab
+        QLabel *sec1 = new QLabel("1️⃣ إنشاء نسخة احتياطية رسمية لبيانات حزمة معينة (ADB Backup to .ab):", page);
+        sec1->setStyleSheet("color: #A8C7FA; font-size: 13px; font-weight: bold;");
+        layout->addWidget(sec1);
+
+        QHBoxLayout *row1 = new QHBoxLayout();
+        backupPkgInput = new QLineEdit(page);
+        backupPkgInput->setPlaceholderText("اسم الحزمة المسموح نسخها (مثال: com.example.myapp)");
+
+        QPushButton *btnBackupAb = new QPushButton("💾 سحب بصيغة (.ab)", page);
+        btnBackupAb->setProperty("class", "ActionBtn");
+        connect(btnBackupAb, &QPushButton::clicked, this, [=]() {
+            QString pkg = backupPkgInput->text().trimmed();
+            if (pkg.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "يرجى كتابة اسم الحزمة أولاً!");
+                return;
+            }
+            QString savePath = QFileDialog::getSaveFileName(this, "حفظ ملف النسخة الاحتياطية", pkg + ".ab", "Android Backup (*.ab)");
+            if (savePath.isEmpty()) return;
+
+            appendLog("جاري طلب النسخ الاحتياطي للحزمة (يرجى الموافقة من شاشة الهاتف): " + pkg, "WARN");
+            runAdbCommand({"backup", "-f", savePath, "-noapk", pkg}, "اكتمل إنشاء ملف النسخة الاحتياطية (.ab).");
+        });
+
+        row1->addWidget(backupPkgInput, 1);
+        row1->addWidget(btnBackupAb);
+        layout->addLayout(row1);
+
+        // 2. فك ضغط ملف .ab إلى أرشيف .tar مباشرة ثم استبدال بيانات تطبيقك الخاص
+        QLabel *sec2 = new QLabel("2️⃣ فك ملف (.ab) غير المشفر إلى (.tar) أو حقنه مباشرة داخل مسار تطبيقك الخاص:", page);
+        sec2->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold; margin-top: 6px;");
+        layout->addWidget(sec2);
+
+        QHBoxLayout *row2 = new QHBoxLayout();
+        abFileInput = new QLineEdit(page);
+        abFileInput->setPlaceholderText("اختر ملف (.ab) المراد فك ضغطه أو استخراج بياناته...");
+
+        QPushButton *browseAbBtn = new QPushButton("📂 اختيار ملف .ab", page);
+        browseAbBtn->setProperty("class", "SecondaryBtn");
+        connect(browseAbBtn, &QPushButton::clicked, this, [=]() {
+            QString f = QFileDialog::getOpenFileName(this, "اختر ملف Android Backup", "", "Android Backup (*.ab);;Tar Archive (*.tar)");
+            if (!f.isEmpty()) abFileInput->setText(f);
+        });
+
+        QPushButton *unpackTarBtn = new QPushButton("📦 تحويل (.ab) إلى (.tar)", page);
+        unpackTarBtn->setProperty("class", "SecondaryBtn");
+        connect(unpackTarBtn, &QPushButton::clicked, this, &MainWindow::convertAbToTar);
+
+        row2->addWidget(abFileInput, 1);
+        row2->addWidget(browseAbBtn);
+        row2->addWidget(unpackTarBtn);
+        layout->addLayout(row2);
+
+        // 3. حقن واستبدال بيانات تطبيقك الخاص (عبر run-as أو Restore)
+        QHBoxLayout *row3 = new QHBoxLayout();
+        targetOwnPkgInput = new QLineEdit(page);
+        targetOwnPkgInput->setPlaceholderText("اسم حزمة تطبيقك الخاص لاستبدال بياناته (مثال: com.abdullah.myapp)");
+
+        QPushButton *injectDataBtn = new QPushButton("⚡ استبدال بيانات تطبيقي من الأرشيف", page);
+        injectDataBtn->setProperty("class", "ActionBtn");
+        connect(injectDataBtn, &QPushButton::clicked, this, &MainWindow::injectTarIntoOwnApp);
+
+        row3->addWidget(targetOwnPkgInput, 1);
+        row3->addWidget(injectDataBtn);
+        layout->addLayout(row3);
+
+        layout->addStretch();
+        return page;
+    }
+
+    // --- الصفحة 4: موجه الأوامر المتقدم ---
+    QWidget* createShellTerminalPage() {
+        QFrame *page = new QFrame(this);
+        page->setObjectName("Card");
+        QVBoxLayout *layout = new QVBoxLayout(page);
+        layout->setContentsMargins(22, 22, 22, 22);
         layout->setSpacing(14);
 
         QLabel *title = new QLabel("💻 موجه أوامر الأندرويد الحر والأوامر السريعة (ADB Shell)", page);
@@ -1135,7 +1012,6 @@ private:
 
         QPushButton *runCmdBtn = new QPushButton("▶️ تنفيذ الأمر", page);
         runCmdBtn->setProperty("class", "ActionBtn");
-        runCmdBtn->setCursor(Qt::PointingHandCursor);
 
         auto executeCustom = [=]() {
             QString raw = customShellInput->text().trimmed();
@@ -1160,7 +1036,6 @@ private:
         auto addQuickBtn = [&](const QString &text, const QStringList &adbArgs) {
             QPushButton *b = new QPushButton(text, page);
             b->setProperty("class", "SecondaryBtn");
-            b->setCursor(Qt::PointingHandCursor);
             connect(b, &QPushButton::clicked, this, [=]() {
                 appendLog("تشغيل الأداة السريعة: " + text, "INFO");
                 runAdbCommand(adbArgs, "تم التنفيذ بنجاح.");
@@ -1198,7 +1073,6 @@ private:
 
         QPushButton *clearBtn = new QPushButton("🧹 مسح السجل", panel);
         clearBtn->setProperty("class", "SecondaryBtn");
-        clearBtn->setCursor(Qt::PointingHandCursor);
 
         topRow->addWidget(logTitle);
         topRow->addStretch();
@@ -1227,6 +1101,113 @@ private:
         return panel;
     }
 
+    // --- تحويل ملف (.ab) غير المشفر إلى (.tar) محلياً باستخدام محرك فك ضغط Zlib في Qt ---
+    void convertAbToTar() {
+        QString abPath = abFileInput->text().trimmed();
+        if (abPath.isEmpty() || !QFile::exists(abPath)) {
+            QMessageBox::warning(this, "تنبيه", "يرجى اختيار ملف (.ab) صحيح أولاً!");
+            return;
+        }
+
+        QFile inFile(abPath);
+        if (!inFile.open(QIODevice::ReadOnly)) {
+            appendLog("تعذر فتح ملف .ab للقراءة!", "ERROR");
+            return;
+        }
+
+        QByteArray rawData = inFile.readAll();
+        inFile.close();
+
+        // تخطي الرأسية النصية لملف Android Backup (أول 4 أسطر تنتهي بـ \n)
+        int newlineCount = 0;
+        int offset = 0;
+        while (offset < rawData.size() && newlineCount < 4) {
+            if (rawData[offset] == '\n') {
+                newlineCount++;
+            }
+            offset++;
+        }
+
+        if (newlineCount < 4 || offset >= rawData.size()) {
+            appendLog("ملف (.ab) غير صالح أو تالف!", "ERROR");
+            return;
+        }
+
+        QByteArray headerText = rawData.left(offset);
+        if (!headerText.contains("ANDROID BACKUP")) {
+            appendLog("هذا الملف ليس ملف Android Backup (.ab) قياسي!", "ERROR");
+            return;
+        }
+        if (!headerText.contains("none")) {
+            appendLog("تنبيه: ملف (.ab) محمي بكلمة مرور تشفير AES، يرجى إنشاء النسخة بدون كلمة مرور.", "ERROR");
+            return;
+        }
+
+        QByteArray payload = rawData.mid(offset);
+        QString tarPath = abPath;
+        if (tarPath.endsWith(".ab", Qt::CaseInsensitive)) {
+            tarPath.chop(3);
+        }
+        tarPath += ".tar";
+
+        // فك ضغط Zlib إذا كان مضغوطاً
+        QByteArray tarData;
+        QList<QByteArray> headerLines = headerText.split('\n');
+        bool isCompressed = (headerLines.size() >= 3 && headerLines[2].trimmed() == "1");
+
+        if (isCompressed) {
+            // إضافة 4 بايت لحجم تقريبي متوقع قبل تمريرها لدالة qUncompress
+            quint32 expectedSize = payload.size() * 6;
+            QByteArray qzlibHeader(4, 0);
+            qzlibHeader[0] = (expectedSize >> 24) & 0xFF;
+            qzlibHeader[1] = (expectedSize >> 16) & 0xFF;
+            qzlibHeader[2] = (expectedSize >> 8) & 0xFF;
+            qzlibHeader[3] = expectedSize & 0xFF;
+
+            tarData = qUncompress(qzlibHeader + payload);
+            if (tarData.isEmpty()) {
+                appendLog("تعذر فك ضغط تدفق Zlib داخل ملف .ab!", "ERROR");
+                return;
+            }
+        } else {
+            tarData = payload;
+        }
+
+        QFile outFile(tarPath);
+        if (outFile.open(QIODevice::WriteOnly)) {
+            outFile.write(tarData);
+            outFile.close();
+            abFileInput->setText(tarPath);
+            appendLog("تم فك ضغط وتحويل ملف (.ab) بنجاح إلى: " + tarPath, "SUCCESS");
+        } else {
+            appendLog("تعذر حفظ ملف (.tar) في المسار المحدد!", "ERROR");
+        }
+    }
+
+    // --- حقن واستبدال بيانات تطبيقك الخاص من ملف .tar ---
+    void injectTarIntoOwnApp() {
+        QString filePath = abFileInput->text().trimmed();
+        QString targetPkg = targetOwnPkgInput->text().trimmed();
+
+        if (filePath.isEmpty() || targetPkg.isEmpty()) {
+            QMessageBox::warning(this, "تنبيه", "يرجى اختيار ملف (.tar) وكتابة اسم حزمة تطبيقك الخاص أولاً!");
+            return;
+        }
+
+        if (filePath.endsWith(".ab", Qt::CaseInsensitive)) {
+            convertAbToTar();
+            filePath = abFileInput->text().trimmed();
+            if (!filePath.endsWith(".tar", Qt::CaseInsensitive)) return;
+        }
+
+        appendLog("1/2 جاري رفع أرشيف البيانات المؤقت إلى الهاتف (/data/local/tmp/restore_data.tar)...", "INFO");
+        runAdbCommand({"push", filePath, "/data/local/tmp/restore_data.tar"}, "تم رفع الأرشيف المؤقت للهاتف.");
+
+        appendLog("2/2 جاري استبدال بيانات الحزمة الخاصة بك عبر صلاحية المطور (run-as " + targetPkg + ")...", "WARN");
+        QString shellCmd = QString("run-as %1 tar -xvf /data/local/tmp/restore_data.tar").arg(targetPkg);
+        runAdbCommand({"shell", shellCmd}, "تم استخراج واستبدال بيانات تطبيقك بنجاح!");
+    }
+
     void appendLog(const QString &message, const QString &level = "INFO") {
         QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss");
         QString color = "#A8C7FA";
@@ -1249,7 +1230,7 @@ private:
         connect(proc, &QProcess::readyReadStandardOutput, this, [=]() {
             QString out = QString::fromUtf8(proc->readAllStandardOutput()).trimmed();
             if (!out.isEmpty()) {
-                for (const QString &line : out.split('\n')) {
+                for (const QString &line : out.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts)) {
                     appendLog(line.trimmed(), "OUTPUT");
                 }
             }
@@ -1274,126 +1255,74 @@ private:
         connect(proc, &QProcess::errorOccurred, this, [=](QProcess::ProcessError) {
             operationProgress->setRange(0, 100);
             operationProgress->setValue(100);
-            appendLog("تعذر تشغيل adb.exe! المسار المفحوص: " + getAdbExecutablePath(), "ERROR");
+            appendLog("تعذر تشغيل ملف adb.exe! تأكد من وجود مجلد platform-tools بجانب الأداة.", "ERROR");
             proc->deleteLater();
         });
 
         proc->start(getAdbExecutablePath(), args);
     }
 
-    // --- فحص ذكي وشامل لحالة اتصال ADB (مع دعم unauthorized والريكفري والقراءة التلقائية) ---
-    void checkDeviceConnection(bool verboseLog) {
+    void checkDeviceSilently() {
         QProcess *proc = new QProcess(this);
         connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
             QString out = QString::fromUtf8(proc->readAllStandardOutput()).trimmed();
-            QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
+            QStringList lines = out.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
+            QString connectedSerial;
 
-            if (verboseLog && !err.isEmpty()) {
-                appendLog(err, "ERROR");
-            }
-
-            QStringList lines = out.split('\n', Qt::SkipEmptyParts);
-            QString serial;
-            QString state;
-
-            for (const QString &rawLine : lines) {
-                QString line = rawLine.trimmed();
-                if (line.startsWith("List of devices") || line.startsWith("*")) continue;
-
-                QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-                if (parts.size() >= 2) {
-                    serial = parts[0];
-                    state = parts[1];
+            for (int i = 1; i < lines.size(); ++i) {
+                QString line = lines[i].trimmed();
+                if (line.endsWith("\tdevice") || line.contains(" device")) {
+                    connectedSerial = line.split(QRegularExpression("\\s+")).first().trimmed();
                     break;
                 }
             }
 
-            if (state == "device") {
-                connectionBadge->setText("● متصل وجاهز: " + serial);
-                connectionBadge->setStyleSheet("background-color: #0F5223; color: #6DD58C; padding: 5px 14px; border-radius: 14px; font-size: 12px; font-weight: bold;");
-                valSerial->setText(serial);
-
-                // إذا كان جهازاً جديداً تم توصيله للتو أو ضغط المستخدم على فحص، اقرأ بياناته فوراً
-                if (lastConnectedSerial != serial || verboseLog) {
-                    lastConnectedSerial = serial;
-                    appendLog("تم اكتشاف هاتف متصل ومصرح له بنجاح (Serial: " + serial + ")", "SUCCESS");
-                    readFullDeviceInfo();
-                }
-            } else if (state == "unauthorized") {
-                lastConnectedSerial.clear();
-                connectionBadge->setText("● بانتظار السماح من شاشة الهاتف (Unauthorized)");
-                connectionBadge->setStyleSheet("background-color: #5C2B0E; color: #FCD34D; padding: 5px 14px; border-radius: 14px; font-size: 12px; font-weight: bold;");
-                valSerial->setText(serial + " (غير مصرح)");
-                if (verboseLog) {
-                    appendLog("الهاتف متصل ولكن يرجى الضغط على 'سماح / Allow USB Debugging' على شاشة الجوال!", "WARN");
-                }
-            } else if (state == "recovery" || state == "sideload") {
-                connectionBadge->setText("● متصل في وضع الريكفري: " + serial);
-                connectionBadge->setStyleSheet("background-color: #004A77; color: #A8C7FA; padding: 5px 14px; border-radius: 14px; font-size: 12px; font-weight: bold;");
-                valSerial->setText(serial + " (" + state + ")");
-                if (verboseLog) {
-                    appendLog("الهاتف متصل في وضع: " + state, "INFO");
-                }
+            if (!connectedSerial.isEmpty()) {
+                connectionBadge->setText("● جهاز متصل: " + connectedSerial);
+                connectionBadge->setStyleSheet("background-color: #0F5223; color: #6DD58C; padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: bold;");
+                valSerial->setText(connectedSerial);
             } else {
-                lastConnectedSerial.clear();
-                connectionBadge->setText("● غير متصل — أوصل الهاتف وفعل تصحيح USB");
-                connectionBadge->setStyleSheet("background-color: #282A2C; color: #FCD34D; padding: 5px 14px; border-radius: 14px; font-size: 12px; font-weight: bold;");
-                if (verboseLog) {
-                    appendLog("لم يتم العثور على أي جهاز متصل حالياً. تأكد من توصيل الكابل وتفعيل USB Debugging.", "WARN");
-                }
+                connectionBadge->setText("● غير متصل - بانتظار توصيل USB أو شبكة Wi-Fi");
+                connectionBadge->setStyleSheet("background-color: #282A2C; color: #FCD34D; padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: bold;");
             }
             proc->deleteLater();
         });
-
-        connect(proc, &QProcess::errorOccurred, this, [=](QProcess::ProcessError) {
-            if (verboseLog) {
-                appendLog("تعذر الوصول إلى ملف adb.exe في المسار: " + getAdbExecutablePath(), "ERROR");
-            }
-            proc->deleteLater();
-        });
-
         proc->start(getAdbExecutablePath(), {"devices"});
     }
 
-    // --- قراءة تفاصيل الهاتف كاملة (الشركة + الموديل + الأندرويد + البطارية) ---
     void readFullDeviceInfo() {
-        appendLog("جاري سحب مواصفات الهاتف المتصل...", "INFO");
+        appendLog("جاري قراءة مواصفات الهاتف المتصل...", "INFO");
 
-        // قراءة الشركة والموديل معاً
         QProcess *pModel = new QProcess(this);
         connect(pModel, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
-            QString out = QString::fromUtf8(pModel->readAllStandardOutput()).trimmed();
-            QStringList lines = out.split('\n', Qt::SkipEmptyParts);
-            if (!lines.isEmpty()) {
-                QString brandModel = lines.join(" ").trimmed().toUpper();
-                valModel->setText(brandModel);
-                appendLog("طراز الهاتف: " + brandModel, "SUCCESS");
+            QString m = QString::fromUtf8(pModel->readAllStandardOutput()).trimmed();
+            if (!m.isEmpty()) {
+                valModel->setText(m);
+                appendLog("طراز الهاتف: " + m, "SUCCESS");
             }
             pModel->deleteLater();
         });
-        pModel->start(getAdbExecutablePath(), {"shell", "getprop ro.product.brand && getprop ro.product.model"});
+        pModel->start(getAdbExecutablePath(), {"shell", "getprop", "ro.product.model"});
 
-        // قراءة إصدار الأندرويد
         QProcess *pVer = new QProcess(this);
         connect(pVer, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
             QString v = QString::fromUtf8(pVer->readAllStandardOutput()).trimmed();
             if (!v.isEmpty()) {
                 valAndroid->setText("Android " + v);
-                appendLog("إصدار النظام: Android " + v, "SUCCESS");
+                appendLog("إصدار الأندرويد: Android " + v, "SUCCESS");
             }
             pVer->deleteLater();
         });
         pVer->start(getAdbExecutablePath(), {"shell", "getprop", "ro.build.version.release"});
 
-        // قراءة نسبة البطارية
         QProcess *pBat = new QProcess(this);
         connect(pBat, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
             QString out = QString::fromUtf8(pBat->readAllStandardOutput());
-            for (const QString &line : out.split('\n')) {
+            for (const QString &line : out.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts)) {
                 if (line.trimmed().startsWith("level:")) {
                     int lvl = line.split(':').last().trimmed().toInt();
                     batteryBar->setValue(lvl);
-                    appendLog(QString("نسبة شحن البطارية: %1%").arg(lvl), "SUCCESS");
+                    appendLog(QString("مستوى شحن البطارية: %1%").arg(lvl), "SUCCESS");
                     break;
                 }
             }
@@ -1404,144 +1333,10 @@ private:
 };
 
 // ============================================================================
-// 4. صفحة استخراج وتعديل ملفات Android Backup (.ab) وإدارة الحزم
-// ============================================================================
-class AbExtractorPage : public QFrame {
-    Q_OBJECT
-public:
-    AbExtractorPage(QWidget *parent = nullptr) : QFrame(parent) {
-        setObjectName("Card");
-        QVBoxLayout *layout = new QVBoxLayout(this);
-        layout->setContentsMargins(22, 20, 22, 20);
-        layout->setSpacing(14);
-
-        QLabel *title = new QLabel("📦 محول ومعدل ملفات النسخ الاحتياطي (.ab) والتحكم الآلي بالحزم", this);
-        title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
-        layout->addWidget(title);
-
-        // صف اختيار ملف .ab
-        QHBoxLayout *fileRow = new QHBoxLayout();
-        abPathInput = new QLineEdit(this);
-        abPathInput->setPlaceholderText("مسار ملف النسخ الاحتياطي (.ab)...");
-
-        QPushButton *browseAbBtn = new QPushButton("📂 استعراض ملف .ab", this);
-        browseAbBtn->setProperty("class", "SecondaryBtn");
-        browseAbBtn->setCursor(Qt::PointingHandCursor);
-        connect(browseAbBtn, &QPushButton::clicked, this, [=]() {
-            QString file = QFileDialog::getOpenFileName(this, "اختر ملف Backup", "", "Android Backup (*.ab)");
-            if (!file.isEmpty()) abPathInput->setText(file);
-        });
-
-        QPushButton *extractBtn = new QPushButton("⚙️ استخراج وفك الملف", this);
-        extractBtn->setProperty("class", "ActionBtn");
-        extractBtn->setCursor(Qt::PointingHandCursor);
-        connect(extractBtn, &QPushButton::clicked, this, &AbExtractorPage::extractAbFile);
-
-        fileRow->addWidget(abPathInput, 1);
-        fileRow->addWidget(browseAbBtn);
-        fileRow->addWidget(extractBtn);
-        layout->addLayout(fileRow);
-
-        // قائمة اختيار الحزمة المستهدفة (10 حزم أساسية)
-        QHBoxLayout *pkgSelectRow = new QHBoxLayout();
-        QLabel *pkgLabel = new QLabel("🎯 اختر الحزمة المستهدفة للتعديل والدفع:", this);
-        pkgLabel->setStyleSheet("color: #C4C7C5; font-size: 13px; font-weight: bold;");
-
-        targetPkgCombo = new QComboBox(this);
-        targetPkgCombo->setStyleSheet("background-color: #131314; color: #A8C7FA; border: 1px solid #333537; border-radius: 8px; padding: 6px 12px; font-size: 13px;");
-        
-        targetPkgCombo->addItems({
-            "com.call.w (المساعد الصوتي والاتصال)",
-            "com.wh.pp (التطبيق الأساسي النسخة أ)",
-            "com.uu.pp (التطبيق الأساسي النسخة ب)",
-            "com.whatsapp (تطبيق واتساب)",
-            "com.telegram.messenger (تطبيق تلغرام)",
-            "com.facebook.katana (تطبيق فيسبوك)",
-            "com.instagram.android (تطبيق انستغرام)",
-            "com.google.android.gm (تطبيق جيميل)",
-            "com.android.providers.settings (إعدادات النظام)",
-            "com.custom.tool.pro (أداة عبدالله برو)"
-        });
-
-        pkgSelectRow->addWidget(pkgLabel);
-        pkgSelectRow->addWidget(targetPkgCombo, 1);
-        layout->addLayout(pkgSelectRow);
-
-        // أزرار المعالجة والتعديل
-        QHBoxLayout *actionRow = new QHBoxLayout();
-        QPushButton *autoModifyBtn = new QPushButton("✨ تنفيذ التعديل التلقائي (إعادة تسمية XML واستبدال النصوص)", this);
-        autoModifyBtn->setProperty("class", "ActionBtn");
-        autoModifyBtn->setCursor(Qt::PointingHandCursor);
-        connect(autoModifyBtn, &QPushButton::clicked, this, &AbExtractorPage::performAutoModifications);
-
-        QPushButton *pushDataBtn = new QPushButton("🚀 دفع الملفات المعدلة للهاتف (ADB Push)", this);
-        pushDataBtn->setProperty("class", "SecondaryBtn");
-        pushDataBtn->setCursor(Qt::PointingHandCursor);
-        connect(pushDataBtn, &QPushButton::clicked, this, &AbExtractorPage::pushDataToDevice);
-
-        actionRow->addWidget(autoModifyBtn);
-        actionRow->addWidget(pushDataBtn);
-        layout->addLayout(actionRow);
-
-        // منطقة السجل والمخرجات
-        logOutput = new QTextEdit(this);
-        logOutput->setReadOnly(true);
-        logOutput->setStyleSheet("background-color: #131314; color: #6DD58C; border: 1px solid #282A2C; border-radius: 10px; font-family: Consolas; font-size: 12px; padding: 10px;");
-        logOutput->append("💡 جاهز لاستخراج وتحليل ملفات الـ .ab وتعديل ملفات الـ XML تلقائياً.");
-        layout->addWidget(logOutput, 1);
-    }
-
-private slots:
-    void extractAbFile() {
-        QString path = abPathInput->text().trimmed();
-        if (path.isEmpty() || !QFileInfo::exists(path)) {
-            QMessageBox::warning(this, "تنبيه", "يرجى اختيار ملف .ab صالح أولاً!");
-            return;
-        }
-        logOutput->append("🔄 جاري فك ملف النسخ الاحتياطي واستخراج محتوياته...");
-        QTimer::singleShot(1200, this, [=]() {
-            logOutput->append("✔ تم استخراج المجلدات بنجاح إلى المسار المؤقت: /extracted_ab_data/");
-            logOutput->append("📁 تم رصد ملفات الـ XML التالية: com.wh.pp.xml, settings_pref.xml");
-        });
-    }
-
-    void performAutoModifications() {
-        QString selectedText = targetPkgCombo->currentText();
-        QString pkgName = selectedText.split(" ").first();
-        QString prefixOld = "com.wh";
-        QString prefixNew = pkgName.contains(".") ? pkgName.section('.', 0, 1) : "com.uu";
-
-        logOutput->append(QString("⚙️ بدء عملية التعديل التلقائي للحزمة المختارة: <b>%1</b>").arg(pkgName));
-        logOutput->append("🔄 البحث عن ملفات XML مطابقة وإعادة تسميتها...");
-        logOutput->append(QString("✔ تم العثور وإعادة تسمية: <b>%1.pp.xml</b>").arg(prefixOld));
-        logOutput->append(QString("➡ الاسم الجديد: <b>%1.pp.xml</b>").arg(prefixNew));
-
-        logOutput->append(QString("🔍 جاري فحص محتوى الـ XML واستبدال '%1' بـ '%2'...").arg(prefixOld, prefixNew));
-        logOutput->append("✔ تم تعديل السطور البرمجية بنجاح والحفاظ على باقي النص سليماً.");
-        logOutput->append("🎉 اكتملت كافة التعديلات التلقائية وأصبح المجلد جاهزاً للدفع.");
-    }
-
-    void pushDataToDevice() {
-        QString selectedPkg = targetPkgCombo->currentText().split(" ").first();
-        logOutput->append(QString("🚀 جاري دفع البيانات المعدلة إلى مسار الحزمة في الهاتف: <b>%1</b>...").arg(selectedPkg));
-        QTimer::singleShot(1000, this, [=]() {
-            logOutput->append("✔ تم دفع الملفات وإذن الملكية بنجاح عبر محرك ADB!");
-            QMessageBox::information(this, "نجاح", "تم تعديل الملفات ودفعها للهاتف وإعادة تشغيل الخدمة بنجاح.");
-        });
-    }
-
-private:
-    QLineEdit *abPathInput;
-    QComboBox *targetPkgCombo;
-    QTextEdit *logOutput;
-};
-
-// ============================================================================
 // 3. نقطة التشغيل الرئيسية
 // ============================================================================
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
-    app.setQuitOnLastWindowClosed(false); // منع إغلاق البرنامج عند إخفاء نافذة الدخول
 
     setupGeminiTypography(app);
 
@@ -1549,8 +1344,8 @@ int main(int argc, char *argv[]) {
     MainWindow mainWin;
 
     QObject::connect(&loginWin, &LoginWindow::loginSuccess, [&](const QString &licenseStatus) {
+        mainWin.setLicenseBadgeText(licenseStatus);
         mainWin.show();
-        mainWin.initializeAdbSession(licenseStatus);
     });
 
     loginWin.show();
