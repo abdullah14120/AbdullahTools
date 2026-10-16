@@ -102,11 +102,11 @@ public:
 
         // شريط علوي يوضح الحزمة المكتشفة
         QHBoxLayout *infoLayout = new QHBoxLayout();
-        QLabel *pkgInfoLbl = new QLabel(QString("📦 الحزمة الأصلية المكتشفة في النسخة: <b style='color:#FCD34D;'>%1</b>")
-                                          .arg(originalPkg.isEmpty() ? "غير معروفة (تلقائي)" : originalPkg), this);
-        infoLayout.addWidget(pkgInfoLbl);
-        infoLayout.addStretch();
-        mainLayout->addLayout(infoLayout);
+QLabel *pkgInfoLbl = new QLabel(QString("📦 الحزمة الأصلية المكتشفة في النسخة: <b style='color:#FCD34D;'>%1</b>")
+                                  .arg(originalPkg.isEmpty() ? "غير معروفة (تلقائي)" : originalPkg), this);
+infoLayout->addWidget(pkgInfoLbl);
+infoLayout->addStretch(); // تم تعديل النقطة إلى سهم ->
+mainLayout->addLayout(infoLayout);
 
         // مقسم بين قائمة ملفات الـ XML ومحرر النصوص
         QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
