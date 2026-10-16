@@ -35,6 +35,10 @@
 #include <QDirIterator>
 #include <QInputDialog>
 #include <QTextStream>
+#include <QSplitter>
+#include <QListWidget>
+#include <QListWidgetItem>
+#include <QComboBox>
 
 // ============================================================================
 // نافذة فرعية متقدمة لإدارة، إعادة تسمية، وتعديل محتوى ملفات الـ XML قبل الحقن
