@@ -8,14 +8,13 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-# تم تصحيح المكونات بإزالة Process لأنها جزء من Core
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 
-add_executable(AndroidTool
+add_executable(AbdullahTool
     main.cpp
 )
 
-target_link_libraries(AndroidTool PRIVATE 
+target_link_libraries(AbdullahTool PRIVATE 
     Qt6::Core 
     Qt6::Gui 
     Qt6::Widgets
