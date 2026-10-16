@@ -1,0 +1,44 @@
+name: Build Abdullah Tool EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: جلب الكود
+      uses: actions/checkout@v4
+
+    - name: تثبيت مكتبة Qt 6
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.6.2'
+        arch: 'win64_msvc2019_64'
+
+    - name: بناء المشروع عبر CMake
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cmake -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release
+
+    - name: تجميع ملفات التشغيل وملفات ADB الرسمية
+      shell: pwsh
+      run: |
+        mkdir dist
+        cp build/Release/AbdullahTool.exe dist/
+        windeployqt --release --no-translations dist/AndroidTool.exe
+        
+        # تحميل أحدث أدوات ADB من جوجل ووضعها داخل المجلد النهائي
+        Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "adb.zip"
+        Expand-Archive -Path "adb.zip" -DestinationPath "./dist" -Force
+
+    - name: رفع الأداة الجاهزة للتحميل
+      uses: actions/upload-artifact@v4
+      with:
+        name: AbdullahTool-v1.0
+        path: ./dist/
