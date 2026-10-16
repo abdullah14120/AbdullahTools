@@ -157,7 +157,7 @@ mainLayout->addLayout(infoLayout);
         QHBoxLayout *bottomRow = new QHBoxLayout();
         QPushButton *autoFixBtn = new QPushButton("⚡ تصحيح تلقائي لأسماء الملفات والمحتوى", this);
         QPushButton *saveAndCloseBtn = new QPushButton("✅ حفظ التعديلات وإغلاق", this);
-        saveAndCloseBtn.setObjectName("SaveBtn");
+        saveAndCloseBtn->setObjectName("SaveBtn");
 
         bottomRow->addWidget(autoFixBtn);
         bottomRow->addStretch();
