@@ -1259,7 +1259,8 @@ private:
 
             XmlEditorDialog editor(tempStage, detectedOriginalPkg, this);
             if (editor.exec() == QDialog::Accepted) {
-                appendLog("تم حفظ تعديلات ملفات الـ XML بنجاح.", "SUCCESS");
+                restoreSourceInput->setText(tempStage);
+                appendLog("تم حفظ تعديلات ملفات الـ XML وتحديد المجلد المعدل للاستعادة.", "SUCCESS");
             }
         });
         editorRow->addWidget(openXmlEditorBtn);
@@ -1294,10 +1295,16 @@ private:
         });
         restoreTargetPkgCombo->setFixedWidth(210);
 
-        QPushButton *doRestoreBtn = new QPushButton("🚀 حقن البيانات واستبدالها", page);
+        QPushButton *doRestoreBtn = new QPushButton("🚀 حقن مباشر (data/data)", page);
         doRestoreBtn->setProperty("class", "ActionBtn");
         connect(doRestoreBtn, &QPushButton::clicked, this, [=]() {
             restoreDataToPackage(restoreSourceInput->text().trimmed(), restoreTargetPkgCombo->currentText().trimmed());
+        });
+
+        QPushButton *doAbRestoreBtn = new QPushButton("📦 إعادة حزم (.ab) واستعادة", page);
+        doAbRestoreBtn->setProperty("class", "SecondaryBtn");
+        connect(doAbRestoreBtn, &QPushButton::clicked, this, [=]() {
+            repackAndRestoreAb(restoreSourceInput->text().trimmed(), restoreTargetPkgCombo->currentText().trimmed());
         });
 
         restoreRow->addWidget(restoreSourceInput, 2);
@@ -1305,6 +1312,7 @@ private:
         restoreRow->addWidget(new QLabel("الحزمة الهدف:", page));
         restoreRow->addWidget(restoreTargetPkgCombo);
         restoreRow->addWidget(doRestoreBtn);
+        restoreRow->addWidget(doAbRestoreBtn);
         layout->addLayout(restoreRow);
 
         layout->addStretch();
@@ -1626,6 +1634,231 @@ private:
 
         appendLog(QString("تم تحويل ملف .ab إلى أرشيف .tar بنجاح: %1").arg(tarFilePath), "SUCCESS");
         return true;
+    }
+// بناء ترويسة ملف USTAR Tar قياسية (512 بايت) متوافقة مع محرك TarBackupReader في أندرويد
+    QByteArray createUstarHeader(const QString &archivePath, qint64 fileSize) {
+        QByteArray header(512, '\0');
+        QByteArray pathBytes = archivePath.toUtf8();
+
+        // تقسيم المسار إذا زاد عن 100 حرف إلى prefix و name حسب معيار USTAR
+        if (pathBytes.size() <= 100) {
+            memcpy(header.data(), pathBytes.constData(), pathBytes.size());
+        } else {
+            int splitIdx = pathBytes.lastIndexOf('/', pathBytes.size() - 100);
+            if (splitIdx == -1) splitIdx = pathBytes.indexOf('/');
+            QByteArray prefix = pathBytes.left(splitIdx);
+            QByteArray name = pathBytes.mid(splitIdx + 1);
+            memcpy(header.data(), name.constData(), qMin(name.size(), 100));
+            memcpy(header.data() + 345, prefix.constData(), qMin(prefix.size(), 155));
+        }
+
+        // الصلاحيات والملكية والحجم والوقت بالنظام الثماني (Octal)
+        memcpy(header.data() + 100, "0000600", 7);
+        memcpy(header.data() + 108, "0001000", 7);
+        memcpy(header.data() + 116, "0001000", 7);
+
+        QByteArray sizeOctal = QString("%1").arg(fileSize, 11, 8, QChar('0')).toLatin1();
+        memcpy(header.data() + 124, sizeOctal.constData(), 11);
+
+        qint64 mtime = QDateTime::currentSecsSinceEpoch();
+        QByteArray mtimeOctal = QString("%1").arg(mtime, 11, 8, QChar('0')).toLatin1();
+        memcpy(header.data() + 136, mtimeOctal.constData(), 11);
+
+        // ملء خانة الـ Checksum بمسافات مؤقتاً لحساب المجموع
+        memset(header.data() + 148, ' ', 8);
+        header[156] = '0'; // نوع الملف: ملف عادي (Regular File)
+        memcpy(header.data() + 257, "ustar", 5);
+        memcpy(header.data() + 263, "00", 2);
+
+        quint32 chksum = 0;
+        for (int i = 0; i < 512; ++i) {
+            chksum += static_cast<unsigned char>(header[i]);
+        }
+        QByteArray chkOctal = QString("%1").arg(chksum, 6, 8, QChar('0')).toLatin1();
+        memcpy(header.data() + 148, chkOctal.constData(), 6);
+        header[154] = '\0';
+        header[155] = ' ';
+
+        return header;
+    }
+
+    // إعادة حزم البيانات إلى ملف (.ab) متوافق مع إصدار وتوقيع الحزمة على الهاتف المتصل ثم استعادته
+    void repackAndRestoreAb(const QString &sourcePath, const QString &targetPkg) {
+        if (sourcePath.isEmpty() || targetPkg.isEmpty()) {
+            QMessageBox::warning(this, "تنبيه", "يرجى تحديد الملف/المجلد واختيار الحزمة الهدف أولاً!");
+            return;
+        }
+
+        QFileInfo srcInfo(sourcePath);
+        if (!srcInfo.exists()) {
+            appendLog("المسار المحدد غير موجود: " + sourcePath, "ERROR");
+            return;
+        }
+
+        // 1. فحص إصدار SDK الهاتف ومعلومات الحزمة الهدف المثبتة على الهاتف
+        appendLog("1/4 جاري فحص إصدار أندرويد الهاتف وبيانات الحزمة الهدف: " + targetPkg, "INFO");
+
+        QProcess sdkProc;
+        sdkProc.start(getAdbExecutablePath(), {"shell", "getprop", "ro.build.version.sdk"});
+        sdkProc.waitForFinished(4000);
+        int deviceSdk = QString::fromUtf8(sdkProc.readAllStandardOutput()).trimmed().toInt();
+        if (deviceSdk <= 0) deviceSdk = 30; // قيمة افتراضية عند عدم القراءة
+
+        QProcess dumpProc;
+        dumpProc.start(getAdbExecutablePath(), {"shell", "dumpsys", "package", targetPkg});
+        dumpProc.waitForFinished(5000);
+        QString dumpOut = QString::fromUtf8(dumpProc.readAllStandardOutput());
+
+        if (dumpOut.isEmpty() || dumpOut.contains("Unable to find package")) {
+            appendLog("الحزمة الهدف (" + targetPkg + ") غير مثبتة على الهاتف المتصل!", "ERROR");
+            return;
+        }
+
+        // التحقق من دعم النسخ الاحتياطي وعدم كون الحزمة المدمجة في النظام مجرد قشرة (Stub)
+        if (!dumpOut.contains("ALLOW_BACKUP")) {
+            appendLog("تنبيه هام: الحزمة المثبتة في النظام لا تدعم ALLOW_BACKUP (أو أنها نسخة Stub مصنعية). قد يرفض النظام adb restore إلا بعد تحديث APK الحزمة.", "WARN");
+        }
+
+        // استخراج versionCode الفعلي للحزمة المثبتة على الهاتف
+        int targetVersionCode = 1;
+        QRegularExpression verRx("versionCode=(\\d+)");
+        QRegularExpressionMatch verMatch = verRx.match(dumpOut);
+        if (verMatch.hasMatch()) {
+            targetVersionCode = verMatch.captured(1).toInt();
+        }
+        appendLog(QString("تم قراءة بيئة الهاتف الهدف -> SDK: %1 | versionCode: %2").arg(deviceSdk).arg(targetVersionCode), "SUCCESS");
+
+        // 2. تجهيز الملفات المستخرجة محلياً في مجلد عمل مؤقت لبناء الـ .ab الجديد
+        QString workStage = QDir::tempPath() + "/abdullah_repack_ab_stage";
+        if (sourcePath != workStage) {
+            QDir(workStage).removeRecursively();
+            QDir().mkpath(workStage);
+
+            if (srcInfo.isFile() && sourcePath.endsWith(".ab", Qt::CaseInsensitive)) {
+                QString tmpTar = QDir::tempPath() + "/abdullah_tmp_unpack.tar";
+                if (!convertAbFileToTar(sourcePath, tmpTar)) return;
+                extractTarLocally(tmpTar, workStage);
+            } else if (srcInfo.isFile() && sourcePath.endsWith(".tar", Qt::CaseInsensitive)) {
+                extractTarLocally(sourcePath, workStage);
+            } else if (srcInfo.isDir()) {
+                copyDirectoryRecursively(sourcePath, workStage);
+            }
+        }
+
+        // تحديد جذر بيانات الحزمة داخل المجلد المؤقت (apps/<old_pkg> أو المجلد نفسه)
+        QString appRoot = workStage;
+        QDir appsDir(workStage + "/apps");
+        if (appsDir.exists()) {
+            QStringList subPkgs = appsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+            if (!subPkgs.isEmpty()) {
+                appRoot = appsDir.absoluteFilePath(subPkgs.first());
+            }
+        }
+
+        // قراءة التوقيع الأصلي من ملف _manifest القديم إن وجد للاحتفاظ به في البناء
+        QStringList existingSigs;
+        QFile oldManifest(appRoot + "/_manifest");
+        if (oldManifest.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QStringList mLines = QString::fromUtf8(oldManifest.readAll()).split('\n', Qt::SkipEmptyParts);
+            oldManifest.close();
+            if (mLines.size() >= 7) {
+                int sigCount = mLines[6].trimmed().toInt();
+                for (int i = 0; i < sigCount && (7 + i) < mLines.size(); ++i) {
+                    existingSigs.append(mLines[7 + i].trimmed());
+                }
+            }
+        }
+
+        // 3. بناء ملف _manifest جديد مطابق للحزمة الهدف وإصدار الهاتف المتصل
+        QByteArray manifestBytes;
+        QTextStream mStream(&manifestBytes, QIODevice::WriteOnly);
+        mStream << "1\n";
+        mStream << targetPkg << "\n";
+        mStream << targetVersionCode << "\n";
+        mStream << deviceSdk << "\n";
+        mStream << "com.android.vending\n";
+        mStream << "0\n";
+        if (!existingSigs.isEmpty()) {
+            mStream << existingSigs.size() << "\n";
+            for (const QString &sig : existingSigs) {
+                mStream << sig << "\n";
+            }
+        } else {
+            mStream << "0\n";
+        }
+        mStream.flush();
+
+        // 4. بناء أرشيف USTAR Tar نقي بترتيب أندرويد الإجباري (_manifest أولاً ثم الملفات تحت apps/<targetPkg>/)
+        appendLog("2/4 جاري بناء هيكل USTAR Tar وضبط مسارات الاستخراج لـ apps/" + targetPkg + "...", "INFO");
+        QByteArray tarStream;
+
+        auto appendFileToTar = [&](const QString &internalTarPath, const QByteArray &content) {
+            tarStream.append(createUstarHeader(internalTarPath, content.size()));
+            tarStream.append(content);
+            int remainder = content.size() % 512;
+            if (remainder != 0) {
+                tarStream.append(QByteArray(512 - remainder, '\0'));
+            }
+        };
+
+        // الشرط الإجباري في أندرويد: ملف _manifest يجب أن يكون أول ملف في الأرشيف
+        appendFileToTar("apps/" + targetPkg + "/_manifest", manifestBytes);
+
+        // جمع كافة الملفات من (sp, db, f, r) وإعادة توجيهها إلى مسار الحزمة الهدف
+        QDirIterator it(appRoot, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            QString fullPath = it.next();
+            QString relPath = QDir(appRoot).relativeFilePath(fullPath).replace('\\', '/');
+            if (relPath == "_manifest") continue;
+
+            // توحيد أسماء المجلدات الصريحة لو كانت مسحوبة يدوياً إلى صيغة TarBackupReader القياسية
+            if (relPath.startsWith("shared_prefs/")) relPath.replace(0, 13, "sp/");
+            else if (relPath.startsWith("databases/")) relPath.replace(0, 10, "db/");
+            else if (relPath.startsWith("files/")) relPath.replace(0, 6, "f/");
+
+            QFile f(fullPath);
+            if (f.open(QIODevice::ReadOnly)) {
+                appendFileToTar("apps/" + targetPkg + "/" + relPath, f.readAll());
+                f.close();
+            }
+        }
+
+        // إغلاق أرشيف الـ Tar بكتلتين صفريتين (1024 بايت)
+        tarStream.append(QByteArray(1024, '\0'));
+
+        // 5. تحديد إصدار ترويسة ANDROID BACKUP المناسب لإصدار أندرويد الهاتف وضغط البيانات بـ Zlib
+        int abHeaderVersion = 5;
+        if (deviceSdk < 19) abHeaderVersion = 1;
+        else if (deviceSdk < 23) abHeaderVersion = 2;
+        else if (deviceSdk < 26) abHeaderVersion = 4;
+
+        appendLog(QString("3/4 جاري ضغط ملف .ab بإصدار ترويسة (%1) متوافق مع الهاتف...").arg(abHeaderVersion), "INFO");
+        QByteArray compressedQt = qCompress(tarStream, 9);
+        // حذف أول 4 بايتات خاصة بـ Qt للحصول على تدفق Zlib قياسي يقبله الأندرويد
+        QByteArray rawZlib = compressedQt.mid(4);
+
+        QString outAbPath = QDir::tempPath() + "/abdullah_patched_" + targetPkg + ".ab";
+        QFile outAb(outAbPath);
+        if (!outAb.open(QIODevice::WriteOnly)) {
+            appendLog("تعذر إنشاء ملف .ab المعدل في المجلد المؤقت!", "ERROR");
+            return;
+        }
+
+        QByteArray abHeader = QString("ANDROID BACKUP\n%1\n1\nnone\n").arg(abHeaderVersion).toUtf8();
+        outAb.write(abHeader);
+        outAb.write(rawZlib);
+        outAb.close();
+
+        // 6. تهيئة محرك النسخ الاحتياطي وتنشيط الحزمة على الهاتف ثم إرسال أمر adb restore
+        runAdbSequence({
+            {{"shell", "bmgr enable true && cmd package unstop " + targetPkg + " 2>/dev/null || true"},
+             "تفعيل خدمة النسخ الاحتياطي وتنشيط مسار الحزمة على الهاتف...", ""},
+            {{"shell", "am", "force-stop", targetPkg},
+             "إغلاق الحزمة الهدف مؤقتاً استعداداً للاستعادة...", ""},
+            {{"restore", outAbPath},
+             "4/4 جاري إرسال ملف (.ab) المعدل إلى الهاتف (يرجى الموافقة على الاستعادة من شاشة الهاتف الآن)...",
+             "تم تنفيذ عملية الاستعادة عبر (adb restore) للحزمة " + targetPkg + " بنجاح!"}
+        });
     }
 
     void restoreDataToPackage(const QString &sourcePath, const QString &targetPkg) {
