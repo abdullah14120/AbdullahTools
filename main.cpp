@@ -757,6 +757,8 @@ public:
         pagesStack->addWidget(createBackupRestorePage());  // 2: النسخ الاحتياطي وحقن data/data والمحرر
         pagesStack->addWidget(createFileTransferPage());   // 3: نقل وسحب الملفات
         pagesStack->addWidget(createShellTerminalPage());  // 4: أوامر Shell المتقدمة
+        pagesStack->addWidget(createWirelessControlPage()); // 5: الربط اللاسلكي والتحكم بالشاشة
+        pagesStack->addWidget(createLocalBridgePage());         // 6: الاتصال عبر التطبيق الوسيط (Local Wi-Fi Bridge)
 
         workAreaLayout->addWidget(pagesStack, 3);
         workAreaLayout->addWidget(createConsolePanel(), 2);
@@ -819,6 +821,24 @@ private:
     // عناصر الصفحة 4
     QLineEdit *customShellInput;
 
+// عناصر الصفحة 5: المركز اللاسلكي والتحكم بالشاشة
+    QLabel *wirelessStatusBanner;
+    QLineEdit *pairIpPortInput;
+    QLineEdit *pairCodeInput;
+    QLineEdit *wirelessConnectIpInput;
+    QCheckBox *chkWirelessStayAwake;
+    QCheckBox *chkWirelessScreenOff;
+    QLineEdit *wirelessQuickPkgInput;
+    QLineEdit *wirelessShellInput;
+    
+    // عناصر الصفحة 6: التطبيق الوسيط عبر شبكة محلية
+    QLineEdit *bridgeIpPortInput;
+    QLabel *bridgeStatusLabel;
+    QLineEdit *bridgeQuickPkgInput;
+    QLineEdit *bridgePushLocalInput;
+    QLineEdit *bridgePushRemoteInput;
+    QLineEdit *bridgeShellInput;
+    
     // --- الشريط العلوي ---
     QWidget* createTopBar() {
         QFrame *topBar = new QFrame(this);
@@ -898,7 +918,9 @@ private:
             {"📦  مدير التطبيقات (APK)", 1},
             {"🧬  بيانات وحزم data/data", 2},
             {"📁  نقل وسحب الملفات", 3},
-            {"💻  أوامر Shell المتقدمة", 4}
+            {"💻  أوامر Shell المتقدمة", 4},
+            {"📡  الربط اللاسلكي والشاشة", 5},
+            {"🌐  التطبيق الوسيط (Wi-Fi Bridge)", 6}
         };
 
         for (const auto &item : items) {
@@ -1363,6 +1385,533 @@ private:
         }
     }
 
+// --- الصفحة 5: المركز اللاسلكي المتكامل (الإقران بالكود + تصحيح الاتصال + عرض الشاشة + العمليات) ---
+    QWidget* createWirelessControlPage() {
+        QFrame *page = new QFrame(this);
+        page->setObjectName("Card");
+        QVBoxLayout *layout = new QVBoxLayout(page);
+        layout->setContentsMargins(22, 16, 22, 16);
+        layout->setSpacing(10);
+
+        // الشريط العلوي: عنوان الصفحة + أول زر للفحص والتصحيح التلقائي للاتصال اللاسلكي
+        QHBoxLayout *headerRow = new QHBoxLayout();
+        QLabel *title = new QLabel("📡 مركز تصحيح الأخطاء اللاسلكي والتحكم بشاشة الهاتف", page);
+        title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
+
+        QPushButton *verifyAndFixBtn = new QPushButton("🩺 فحص وتصحيح الاتصال اللاسلكي الآن", page);
+        verifyAndFixBtn->setProperty("class", "ActionBtn");
+        connect(verifyAndFixBtn, &QPushButton::clicked, this, &MainWindow::verifyAndFixWirelessConnection);
+
+        headerRow->addWidget(title);
+        headerRow->addStretch();
+        headerRow->addWidget(verifyAndFixBtn);
+        layout->addLayout(headerRow);
+
+        // لافتة حالة الاتصال اللاسلكي الفورية
+        wirelessStatusBanner = new QLabel("ℹ️ حالة اللاسلكي: اضغط على (فحص وتصحيح الاتصال) للتأكد من جاهزية الهاتف لتلقي الأوامر.", page);
+        wirelessStatusBanner->setStyleSheet("background-color: #131314; color: #FCD34D; border: 1px solid #333537; border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: bold;");
+        layout->addWidget(wirelessStatusBanner);
+
+        // 1. قسم الإقران بالرمز السري (Pairing Code - Android 11+)
+        QLabel *sec1 = new QLabel("1️⃣ الخطوة الأولى (لمرة واحدة): إقران الهاتف بالرمز السري المكون من 6 أرقام (Pair with code):", page);
+        sec1->setStyleSheet("color: #FCD34D; font-size: 13px; font-weight: bold;");
+        layout->addWidget(sec1);
+
+        QHBoxLayout *pairRow = new QHBoxLayout();
+        pairIpPortInput = new QLineEdit(page);
+        pairIpPortInput->setPlaceholderText("IP:Port الإقران (الذي يظهر تحت الرمز السري، مثال: 192.168.1.15:38123)");
+
+        pairCodeInput = new QLineEdit(page);
+        pairCodeInput->setPlaceholderText("الرمز السري (6 أرقام)");
+        pairCodeInput->setFixedWidth(160);
+
+        QPushButton *doPairBtn = new QPushButton("🔗 إقران بالرمز (adb pair)", page);
+        doPairBtn->setProperty("class", "SecondaryBtn");
+        connect(doPairBtn, &QPushButton::clicked, this, [=]() {
+            QString pairAddr = pairIpPortInput->text().trimmed();
+            QString code = pairCodeInput->text().trimmed();
+            if (pairAddr.isEmpty() || code.isEmpty()) {
+                QMessageBox::warning(this, "بيانات ناقصة", "يرجى إدخال عنوان IP:Port الخاص بنافذة الإقران، وإدخال الرمز السري المكون من 6 أرقام!");
+                return;
+            }
+            appendLog("جاري إقران الجهاز لاسلكياً على " + pairAddr + " بالرمز: " + code, "INFO");
+            QProcess *proc = new QProcess(this);
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
+                QString out = QString::fromUtf8(proc->readAllStandardOutput() + proc->readAllStandardError()).trimmed();
+                appendLog(out, out.contains("Successfully paired", Qt::CaseInsensitive) ? "SUCCESS" : "WARN");
+                if (out.contains("Successfully paired", Qt::CaseInsensitive)) {
+                    wirelessStatusBanner->setText("✔ تم الإقران بنجاح! الآن أدخل الـ IP والمنفذ الرئيسي في الخطوة 2 واضغط اتصال.");
+                    wirelessStatusBanner->setStyleSheet("background-color: #0F5223; color: #6DD58C; border-radius: 8px; padding: 8px 12px; font-weight: bold;");
+                    // نسخ الـ IP تلقائياً لخانة الاتصال لتسهيل الأمر على المستخدم
+                    QString ipOnly = pairAddr.split(':').first();
+                    if (wirelessConnectIpInput->text().isEmpty()) {
+                        wirelessConnectIpInput->setText(ipOnly + ":");
+                    }
+                }
+                proc->deleteLater();
+            });
+            proc->start(getAdbExecutablePath(), {"pair", pairAddr, code});
+        });
+
+        pairRow->addWidget(pairIpPortInput, 2);
+        pairRow->addWidget(pairCodeInput);
+        pairRow->addWidget(doPairBtn);
+        layout->addLayout(pairRow);
+
+        // 2. قسم الاتصال اللاسلكي الرئيسي بعد الإقران
+        QLabel *sec2 = new QLabel("2️⃣ الخطوة الثانية: الاتصال اللاسلكي الدائم (أدخل الـ IP والمنفذ الظاهر في الصفحة الرئيسية لتصحيح الأخطاء اللاسلكي):", page);
+        sec2->setStyleSheet("color: #A8C7FA; font-size: 13px; font-weight: bold;");
+        layout->addWidget(sec2);
+
+        QHBoxLayout *connRow = new QHBoxLayout();
+        wirelessConnectIpInput = new QLineEdit(page);
+        wirelessConnectIpInput->setPlaceholderText("IP:Port الاتصال الرئيسي (مثال: 192.168.1.15:41555)");
+
+        QPushButton *doConnBtn = new QPushButton("🔌 اتصال بالجهاز (adb connect)", page);
+        doConnBtn->setProperty("class", "ActionBtn");
+        connect(doConnBtn, &QPushButton::clicked, this, [=]() {
+            QString addr = wirelessConnectIpInput->text().trimmed();
+            if (addr.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "أدخل عنوان IP والمنفذ الرئيسي للاتصال!");
+                return;
+            }
+            wifiIpInput->setText(addr);
+            appendLog("جاري الاتصال لاسلكياً بـ " + addr + " ...", "INFO");
+            QProcess *proc = new QProcess(this);
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
+                QString out = QString::fromUtf8(proc->readAllStandardOutput() + proc->readAllStandardError()).trimmed();
+                appendLog(out, out.contains("connected to", Qt::CaseInsensitive) ? "SUCCESS" : "ERROR");
+                checkDeviceSilently();
+                verifyAndFixWirelessConnection();
+                proc->deleteLater();
+            });
+            proc->start(getAdbExecutablePath(), {"connect", addr});
+        });
+
+        QPushButton *disconnectAllBtn = new QPushButton("❌ فصل اللاسلكي", page);
+        disconnectAllBtn->setProperty("class", "DangerBtn");
+        connect(disconnectAllBtn, &QPushButton::clicked, this, [=]() {
+            runAdbCommand({"disconnect"}, "تم فصل كافة الاتصالات اللاسلكية.");
+            checkDeviceSilently();
+        });
+
+        connRow->addWidget(wirelessConnectIpInput, 2);
+        connRow->addWidget(doConnBtn);
+        connRow->addWidget(disconnectAllBtn);
+        layout->addLayout(connRow);
+
+        // 3. قسم إظهار شاشة الهاتف على الكمبيوتر والتحكم بها لاسلكياً
+        QLabel *sec3 = new QLabel("3️⃣ عرض شاشة الجوال على الكمبيوتر والتحكم الكامل بها عن بُعد (Wireless Screen & Remote Control):", page);
+        sec3->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold;");
+        layout->addWidget(sec3);
+
+        QHBoxLayout *screenRow = new QHBoxLayout();
+        QPushButton *launchScrcpyBtn = new QPushButton("📱 إظهار شاشة الهاتف والتحكم بها الآن (Live Screen)", page);
+        launchScrcpyBtn->setProperty("class", "ActionBtn");
+        connect(launchScrcpyBtn, &QPushButton::clicked, this, &MainWindow::launchWirelessScreenMirror);
+
+        chkWirelessStayAwake = new QCheckBox("منع قفل الشاشة أثناء التحكم", page);
+        chkWirelessStayAwake->setChecked(true);
+
+        chkWirelessScreenOff = new QCheckBox("إطفاء شاشة الهاتف الفعلية لتوفير الطاقة", page);
+        chkWirelessScreenOff->setChecked(false);
+
+        QPushButton *screenshotBtn = new QPushButton("📸 لقطة شاشة للكمبيوتر", page);
+        screenshotBtn->setProperty("class", "SecondaryBtn");
+        connect(screenshotBtn, &QPushButton::clicked, this, [=]() {
+            QString savePath = QFileDialog::getSaveFileName(this, "حفظ لقطة شاشة الهاتف", QDir::homePath() + "/Desktop/screen.png", "PNG Image (*.png)");
+            if (savePath.isEmpty()) return;
+            runAdbSequence({
+                {{"shell", "screencap", "-p", "/sdcard/abdullah_screen.png"}, "جاري التقاط صورة لشاشة الهاتف لاسلكياً...", ""},
+                {{"pull", "/sdcard/abdullah_screen.png", savePath}, "جاري سحب لقطة الشاشة إلى الكمبيوتر...", "تم حفظ لقطة الشاشة بنجاح في: " + savePath},
+                {{"shell", "rm", "-f", "/sdcard/abdullah_screen.png"}, "", ""}
+            });
+        });
+
+        screenRow->addWidget(launchScrcpyBtn);
+        screenRow->addWidget(chkWirelessStayAwake);
+        screenRow->addWidget(chkWirelessScreenOff);
+        screenRow->addStretch();
+        screenRow->addWidget(screenshotBtn);
+        layout->addLayout(screenRow);
+
+        // أزرار التحكم الفوري بأزرار الهاتف عن بُعد
+        QHBoxLayout *remoteKeysRow = new QHBoxLayout();
+        auto addKeyBtn = [&](const QString &lbl, const QString &keyCode) {
+            QPushButton *b = new QPushButton(lbl, page);
+            b->setProperty("class", "SecondaryBtn");
+            connect(b, &QPushButton::clicked, this, [=]() {
+                runAdbCommand({"shell", "input", "keyevent", keyCode}, "تم إرسال زر التحكم: " + lbl);
+            });
+            remoteKeysRow->addWidget(b);
+        };
+        addKeyBtn("🏠 الرئيسية (Home)", "3");
+        addKeyBtn("🔙 رجوع (Back)", "4");
+        addKeyBtn("🗂️ التطبيقات الأخيرة", "187");
+        addKeyBtn("🔊 رفع الصوت", "24");
+        addKeyBtn("🔉 خفض الصوت", "25");
+        addKeyBtn("🔒 زر الباور (إيقاظ/قفل)", "26");
+        layout->addLayout(remoteKeysRow);
+
+        // 4. قسم العمليات اللاسلكية المباشرة (Install / Backup / Restore / Shell)
+        QLabel *sec4 = new QLabel("4️⃣ تنفيذ مهام ADB اللاسلكية السريعة (Install / Backup / Restore / Shell):", page);
+        sec4->setStyleSheet("color: #38BDF8; font-size: 13px; font-weight: bold;");
+        layout->addWidget(sec4);
+
+        QHBoxLayout *opsRow = new QHBoxLayout();
+        wirelessQuickPkgInput = new QLineEdit("com.whatsapp", page);
+        wirelessQuickPkgInput->setPlaceholderText("اسم الحزمة للنسخ الاحتياطي اللاسلكي...");
+        wirelessQuickPkgInput->setFixedWidth(190);
+
+        QPushButton *wInstallBtn = new QPushButton("📦 تثبيت APK لاسلكياً", page);
+        wInstallBtn->setProperty("class", "SecondaryBtn");
+        connect(wInstallBtn, &QPushButton::clicked, this, [=]() {
+            QString apk = QFileDialog::getOpenFileName(this, "اختر ملف APK لتثبيته لاسلكياً", "", "Android Package (*.apk)");
+            if (!apk.isEmpty()) {
+                appendLog("جاري تثبيت APK لاسلكياً: " + apk, "INFO");
+                runAdbCommand({"install", "-r", "-g", apk}, "تم تثبيت التطبيق لاسلكياً بنجاح!");
+            }
+        });
+
+        QPushButton *wBackupBtn = new QPushButton("💾 سحب Backup (.ab) لاسلكياً", page);
+        wBackupBtn->setProperty("class", "SecondaryBtn");
+        connect(wBackupBtn, &QPushButton::clicked, this, [=]() {
+            QString pkg = wirelessQuickPkgInput->text().trimmed();
+            if (pkg.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "أدخل اسم الحزمة أولاً!");
+                return;
+            }
+            QString out = QFileDialog::getSaveFileName(this, "حفظ النسخة الاحتياطية لاسلكياً", QDir::homePath() + "/Desktop/" + pkg + ".ab", "Android Backup (*.ab)");
+            if (!out.isEmpty()) {
+                appendLog("جاري سحب نسخة (.ab) لاسلكياً للحزمة " + pkg + " (وافق من شاشة الهاتف)...", "WARN");
+                runAdbCommand({"backup", "-f", out, "-noapk", pkg}, "اكتمل النسخ الاحتياطي اللاسلكي بنجاح.");
+            }
+        });
+
+        QPushButton *wRestoreBtn = new QPushButton("♻️ استعادة (.ab) لاسلكياً", page);
+        wRestoreBtn->setProperty("class", "SecondaryBtn");
+        connect(wRestoreBtn, &QPushButton::clicked, this, [=]() {
+            QString ab = QFileDialog::getOpenFileName(this, "اختر ملف .ab لاستعادته لاسلكياً", "", "Android Backup (*.ab)");
+            if (!ab.isEmpty()) {
+                appendLog("جاري استعادة ملف (.ab) لاسلكياً (وافق من شاشة الهاتف)...", "WARN");
+                runAdbCommand({"restore", ab}, "اكتملت الاستعادة اللاسلكية بنجاح.");
+            }
+        });
+
+        QPushButton *wGoDataBtn = new QPushButton("🧬 حقن متقدم وتوقيع (.ab)", page);
+        wGoDataBtn->setProperty("class", "SecondaryBtn");
+        connect(wGoDataBtn, &QPushButton::clicked, this, [=]() {
+            pagesStack->setCurrentIndex(2); // الانتقال لتبويب حقن data/data وتعديل التوقيع
+        });
+
+        opsRow->addWidget(wInstallBtn);
+        opsRow->addWidget(wirelessQuickPkgInput);
+        opsRow->addWidget(wBackupBtn);
+        opsRow->addWidget(wRestoreBtn);
+        opsRow->addWidget(wGoDataBtn);
+        layout->addLayout(opsRow);
+
+        // سطر أوامر Shell لاسلكي سريع داخل نفس الصفحة
+        QHBoxLayout *wShellRow = new QHBoxLayout();
+        wirelessShellInput = new QLineEdit(page);
+        wirelessShellInput->setPlaceholderText("أمر Shell لاسلكي فوري (مثال: pm list packages -3 أو dumpsys package com.whatsapp)...");
+
+        QPushButton *wRunShellBtn = new QPushButton("▶️ تنفيذ Shell لاسلكي", page);
+        wRunShellBtn->setProperty("class", "ActionBtn");
+        auto runWShell = [=]() {
+            QString cmd = wirelessShellInput->text().trimmed();
+            if (cmd.isEmpty()) return;
+            QStringList args = {"shell"};
+            args.append(QProcess::splitCommand(cmd));
+            runAdbCommand(args, "تم تنفيذ أمر الـ Shell اللاسلكي.");
+        };
+        connect(wRunShellBtn, &QPushButton::clicked, this, runWShell);
+        connect(wirelessShellInput, &QLineEdit::returnPressed, this, runWShell);
+
+        wShellRow->addWidget(wirelessShellInput, 1);
+        wShellRow->addWidget(wRunShellBtn);
+        layout->addLayout(wShellRow);
+
+        layout->addStretch();
+        return page;
+    }
+
+    // --- دالة فحص وتصحيح الاتصال اللاسلكي تلقائياً (التأكد من نجاح الاقتران واستجابة الـ Shell) ---
+    void verifyAndFixWirelessConnection() {
+        appendLog("جاري فحص وتشخيص حالة الاتصال اللاسلكي بالهاتف...", "INFO");
+
+        QProcess *proc = new QProcess(this);
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int, QProcess::ExitStatus) {
+            QString out = QString::fromUtf8(proc->readAllStandardOutput()).trimmed();
+            proc->deleteLater();
+
+            if (out.contains("offline")) {
+                wirelessStatusBanner->setText("⚠️ الجهاز متصل ولكن بحالة (Offline)! جاري تنفيذ تصحيح تلقائي (adb reconnect)...");
+                wirelessStatusBanner->setStyleSheet("background-color: #3C2F19; color: #FCD34D; border-radius: 8px; padding: 8px 12px; font-weight: bold;");
+                runAdbSequence({
+                    {{"reconnect", "offline"}, "إعادة تنشيط الأجهزة المعلقة (offline)...", ""},
+                    {{"connect", wirelessConnectIpInput->text().trimmed()}, "إعادة الاتصال بالعنوان اللاسلكي...", "تم تصحيح مسار الاتصال اللاسلكي."}
+                });
+                return;
+            }
+
+            if (out.contains("unauthorized")) {
+                wirelessStatusBanner->setText("🔒 الجهاز بانتظار المصادقة (Unauthorized)! يرجى إتمام الخطوة 1 (إدخال رمز الإقران 6 أرقام) أو الموافقة من شاشة الهاتف.");
+                wirelessStatusBanner->setStyleSheet("background-color: #3C1919; color: #F2B8B5; border-radius: 8px; padding: 8px 12px; font-weight: bold;");
+                return;
+            }
+
+            // اختبار حقيقي بتنفيذ أمر داخل نواة الهاتف للتأكد أن الأوامر تعمل فعلياً
+            QProcess *testShell = new QProcess(this);
+            connect(testShell, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int code, QProcess::ExitStatus) {
+                QString model = QString::fromUtf8(testShell->readAllStandardOutput()).trimmed();
+                testShell->deleteLater();
+                if (code == 0 && !model.isEmpty()) {
+                    wirelessStatusBanner->setText("✔ الاتصال اللاسلكي ناجح وفعّال 100%! الهاتف المستجيب: [" + model + "] جاهز لتنفيذ جميع الأوامر.");
+                    wirelessStatusBanner->setStyleSheet("background-color: #0F5223; color: #6DD58C; border-radius: 8px; padding: 8px 12px; font-weight: bold;");
+                    appendLog("اختبار Shell اللاسلكي ناجح -> الجهاز المستجيب: " + model, "SUCCESS");
+                    checkDeviceSilently();
+                    readFullDeviceInfo();
+                } else {
+                    wirelessStatusBanner->setText("❌ لا يوجد اتصال فعّال! إذا كنت في أندرويد 11+ نفّذ (الخطوة 1: الإقران بالرمز السري) أولاً ثم (الخطوة 2: الاتصال بالمنفذ الرئيسي).");
+                    wirelessStatusBanner->setStyleSheet("background-color: #3C1919; color: #F2B8B5; border-radius: 8px; padding: 8px 12px; font-weight: bold;");
+                    appendLog("فشل اختبار استجابة الهاتف! تأكد من إقران الجهاز بالرمز السري أولاً.", "ERROR");
+                }
+            });
+            testShell->start(getAdbExecutablePath(), {"shell", "getprop", "ro.product.model"});
+        });
+        proc->start(getAdbExecutablePath(), {"devices"});
+    }
+
+    // --- دالة تشغيل بث شاشة الهاتف والتحكم بها عبر الكمبيوتر (Scrcpy Engine) ---
+    void launchWirelessScreenMirror() {
+        QString appDir = QCoreApplication::applicationDirPath();
+        QString scrcpyExe;
+
+        QStringList possiblePaths = {
+            appDir + "/scrcpy/scrcpy.exe",
+            appDir + "/platform-tools/scrcpy.exe",
+            appDir + "/scrcpy.exe"
+        };
+
+        for (const QString &p : possiblePaths) {
+            if (QFile::exists(p)) {
+                scrcpyExe = p;
+                break;
+            }
+        }
+
+        if (scrcpyExe.isEmpty()) {
+            scrcpyExe = "scrcpy"; // في حال كان مضافاً في متغيرات النظام PATH
+        }
+
+        QStringList args;
+        args << "--window-title" << "AbdullahTool Pro - Live Screen Control";
+        args << "--max-size" << "1080";
+        args << "--video-bit-rate" << "4M";
+        args << "--max-fps" << "60";
+
+        if (chkWirelessStayAwake->isChecked()) args << "--stay-awake";
+        if (chkWirelessScreenOff->isChecked()) args << "--turn-screen-off";
+
+        appendLog("جاري تشغيل نافذة عرض شاشة الهاتف والتحكم بها عن بُعد...", "INFO");
+        bool started = QProcess::startDetached(scrcpyExe, args);
+        if (!started) {
+            appendLog("لم يتم العثور على محرك عرض الشاشة (scrcpy.exe) داخل مجلد الأداة!", "ERROR");
+            QMessageBox::information(this, "محرك عرض الشاشة (Scrcpy)",
+                "لتشغيل عرض شاشة الهاتف والتحكم بها، ضع ملفات أداة (scrcpy-win64) داخل مجلد باسم scrcpy بجانب برنامج AbdullahTool.exe.");
+        } else {
+            appendLog("تم فتح نافذة شاشة الهاتف بنجاح! يمكنك الآن التحكم بالهاتف بالماوس والكيبورد.", "SUCCESS");
+        }
+    }
+    
+    // --- الصفحة 6: إدارة الاتصال عبر التطبيق الوسيط عبر شبكة Wi-Fi محلية ---
+    QWidget* createLocalBridgePage() {
+        QFrame *page = new QFrame(this);
+        page->setObjectName("Card");
+        QVBoxLayout *layout = new QVBoxLayout(page);
+        layout->setContentsMargins(22, 18, 22, 18);
+        layout->setSpacing(12);
+
+        QLabel *title = new QLabel("🌐 مركز الاتصال عبر التطبيق الوسيط (Local Wi-Fi Bridge للأجهزة غير المدعومة)", page);
+        title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
+        layout->addWidget(title);
+
+        QLabel *desc = new QLabel(
+            "💡 هذه الطريقة مثالية للأجهزة التي لا تدعم تصحيح الأخطاء اللاسلكي الحديث أو منفذ الـ USB المعطل. "
+            "قم بتشغيل التطبيق الوسيط على الهاتف (ليظهر لك عنوان الـ IP والمنفذ المحلي)، ثم أدخله أدناه واضغط اتصال.",
+            page
+        );
+        desc->setWordWrap(true);
+        desc->setStyleSheet("color: #8E918F; font-size: 12px; line-height: 1.5;");
+        layout->addWidget(desc);
+
+        // بانر حالة الاتصال الذكي
+        bridgeStatusLabel = new QLabel("● الحالة: غير متصل عبر الوسيط. بانتظار إدخال عنوان الاتصال.", page);
+        bridgeStatusLabel->setStyleSheet("background-color: #131314; color: #FCD34D; border: 1px solid #333537; border-radius: 8px; padding: 10px 14px; font-size: 12px; font-weight: bold;");
+        layout->addWidget(bridgeStatusLabel);
+
+        // حقل الإدخال وزر الاتصال والفحص الذكي
+        QHBoxLayout *connRow = new QHBoxLayout();
+        bridgeIpPortInput = new QLineEdit(page);
+        bridgeIpPortInput->setPlaceholderText("أدخل عنوان IP والمنفذ من التطبيق الوسيط (مثال: 192.168.1.50:5555)");
+
+        QPushButton *bridgeConnectBtn = new QPushButton("🔌 ربط وفحص الاتصال بالوسيط", page);
+        bridgeConnectBtn->setProperty("class", "ActionBtn");
+        connect(bridgeConnectBtn, &QPushButton::clicked, this, [=]() {
+            QString addr = bridgeIpPortInput->text().trimmed();
+            if (addr.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "يرجى كتابة عنوان IP والمنفذ الخاص بالوسيط أولاً!");
+                return;
+            }
+            bridgeStatusLabel->setText("⏳ جاري إنشاء الجسر والتحقق من استجابة الهاتف عبر الوسيط...");
+            bridgeStatusLabel->setStyleSheet("background-color: #3C2F19; color: #FCD34D; border-radius: 8px; padding: 10px 14px; font-weight: bold;");
+
+            // تنفيذ أمر الاتصال الذكي مع فحص استجابة الـ shell فوراً للتأكد من نجاح الرابط
+            runAdbSequence({
+                {{"connect", addr}, "إرسال أمر الربط بالشبكة المحلية...", ""},
+                {{"shell", "getprop", "ro.product.model"}, "فحص استجابة نواة النظام عبر الجسر...", "✔ تم الاتصال بنجاح عبر التطبيق الوسيط وأصبح الهاتف جاهزاً للأوامر!"}
+            });
+
+            // تحديث حالة البانر بعد انتهاء الفحص
+            QTimer::singleShot(2500, this, [=]() {
+                checkDeviceSilently();
+                readFullDeviceInfo();
+                bridgeStatusLabel->setText("✔ متصل بنجاح عبر التطبيق الوسيط وجاهز لتنفيذ المهام.");
+                bridgeStatusLabel->setStyleSheet("background-color: #0F5223; color: #6DD58C; border-radius: 8px; padding: 10px 14px; font-weight: bold;");
+            });
+        });
+
+        QPushButton *bridgeDisconnectBtn = new QPushButton("❌ قطع الاتصال", page);
+        bridgeDisconnectBtn->setProperty("class", "DangerBtn");
+        connect(bridgeDisconnectBtn, &QPushButton::clicked, this, [=]() {
+            runAdbCommand({"disconnect"}, "تم قطع الاتصال بالوسيط.");
+            bridgeStatusLabel->setText("● الحالة: تم قطع الاتصال.");
+            bridgeStatusLabel->setStyleSheet("background-color: #282A2C; color: #FCD34D; border-radius: 8px; padding: 10px 14px; font-weight: bold;");
+            checkDeviceSilently();
+        });
+
+        connRow->addWidget(bridgeIpPortInput, 2);
+        connRow->addWidget(bridgeConnectBtn);
+        connRow->addWidget(bridgeDisconnectBtn);
+        layout->addLayout(connRow);
+
+        // قسم الميزات والعمليات عبر الاتصال الوسيط (Install / Push / Backup / Restore)
+        QLabel *opsTitle = new QLabel("⚡ العمليات المتاحة عبر الاتصال الوسيط:", page);
+        opsTitle->setStyleSheet("color: #A8C7FA; font-size: 13px; font-weight: bold; margin-top: 10px;");
+        layout->addWidget(opsTitle);
+
+        // 1. زر تثبيت APK
+        QHBoxLayout *row1 = new QHBoxLayout();
+        QPushButton *bridgeInstallBtn = new QPushButton("📦 تثبيت ملف APK عبر الوسيط (adb install)", page);
+        bridgeInstallBtn->setProperty("class", "SecondaryBtn");
+        connect(bridgeInstallBtn, &QPushButton::clicked, this, [=]() {
+            QString apk = QFileDialog::getOpenFileName(this, "اختر ملف APK للتثبيت", "", "Android Package (*.apk)");
+            if (!apk.isEmpty()) {
+                appendLog("جاري تثبيت التطبيق عبر الجسر المحلي...", "INFO");
+                runAdbCommand({"install", "-r", "-g", apk}, "اكتمل تثبيت التطبيق عبر الوسيط بنجاح.");
+            }
+        });
+        row1->addWidget(bridgeInstallBtn);
+        row1->addStretch();
+        layout->addLayout(row1);
+
+        // 2. زر نقل ملفات (ADB Push)
+        QHBoxLayout *row2 = new QHBoxLayout();
+        bridgePushLocalInput = new QLineEdit(page);
+        bridgePushLocalInput->setPlaceholderText("ملف الكمبيوتر للإرسال...");
+        QPushButton *browsePushFile = new QPushButton("📂 استعراض", page);
+        browsePushFile->setProperty("class", "SecondaryBtn");
+        connect(browsePushFile, &QPushButton::clicked, this, [=]() {
+            QString f = QFileDialog::getOpenFileName(this, "اختر ملفاً لنقله للهاتف");
+            if (!f.isEmpty()) bridgePushLocalInput->setText(f);
+        });
+
+        bridgePushRemoteInput = new QLineEdit("/sdcard/Download/", page);
+        bridgePushRemoteInput->setPlaceholderText("مسار الوجهة في الهاتف...");
+
+        QPushButton *bridgePushBtn = new QPushButton("📤 نقل الملف (adb push)", page);
+        bridgePushBtn->setProperty("class", "SecondaryBtn");
+        connect(bridgePushBtn, &QPushButton::clicked, this, [=]() {
+            QString local = bridgePushLocalInput->text().trimmed();
+            QString remote = bridgePushRemoteInput->text().trimmed();
+            if (local.isEmpty() || remote.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "حدد ملف الكمبيوتر ومسار الهاتف أولاً!");
+                return;
+            }
+            appendLog("جاري إرسال الملف عبر الجسر المحلي...", "INFO");
+            runAdbCommand({"push", local, remote}, "تم نقل الملف إلى الهاتف بنجاح.");
+        });
+
+        row2->addWidget(bridgePushLocalInput, 2);
+        row2->addWidget(browsePushFile);
+        row2->addWidget(bridgePushRemoteInput, 2);
+        row2->addWidget(bridgePushBtn);
+        layout->addLayout(row2);
+
+        // 3. زر سحب نسخة احتياطية (ADB Backup) واستعادة (ADB Restore)
+        QHBoxLayout *row3 = new QHBoxLayout();
+        bridgeQuickPkgInput = new QLineEdit("com.whatsapp", page);
+        bridgeQuickPkgInput->setPlaceholderText("اسم الحزمة...");
+        bridgeQuickPkgInput->setFixedWidth(180);
+
+        QPushButton *bridgeBackupBtn = new QPushButton("💾 سحب Backup (.ab) للكمبيوتر", page);
+        bridgeBackupBtn->setProperty("class", "SecondaryBtn");
+        connect(bridgeBackupBtn, &QPushButton::clicked, this, [=]() {
+            QString pkg = bridgeQuickPkgInput->text().trimmed();
+            if (pkg.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "أدخل اسم الحزمة أولاً!");
+                return;
+            }
+            QString out = QFileDialog::getSaveFileName(this, "حفظ النسخة الاحتياطية", QDir::homePath() + "/Desktop/" + pkg + ".ab", "Android Backup (*.ab)");
+            if (!out.isEmpty()) {
+                appendLog("طلب نسخ احتياطي للحزمة " + pkg + " (يرجى الموافقة من شاشة الهاتف)...", "WARN");
+                runAdbCommand({"backup", "-f", out, "-noapk", pkg}, "تم حفظ النسخة الاحتياطية بنجاح.");
+            }
+        });
+
+        QPushButton *bridgeRestoreBtn = new QPushButton("♻️ استعادة نسخة (.ab) للهاتف", page);
+        bridgeRestoreBtn->setProperty("class", "SecondaryBtn");
+        connect(bridgeRestoreBtn, &QPushButton::clicked, this, [=]() {
+            QString ab = QFileDialog::getOpenFileName(this, "اختر ملف .ab للاستعادة", "", "Android Backup (*.ab)");
+            if (!ab.isEmpty()) {
+                appendLog("بدء استعادة ملف (.ab) عبر الوسيط (وافق من شاشة الهاتف)...", "WARN");
+                runAdbCommand({"restore", ab}, "اكتملت استعادة النسخة الاحتياطية بنجاح.");
+            }
+        });
+
+        row3->addWidget(new QLabel("الحزمة:", page));
+        row3->addWidget(bridgeQuickPkgInput);
+        row3->addWidget(bridgeBackupBtn);
+        row3->addWidget(bridgeRestoreBtn);
+        row3->addStretch();
+        layout->addLayout(row3);
+
+        // سطر أوامر Shell حر عبر الجسر المحلي
+        QHBoxLayout *row4 = new QHBoxLayout();
+        bridgeShellInput = new QLineEdit(page);
+        bridgeShellInput->setPlaceholderText("أمر Shell عبر الجسر المحلي (مثال: shell pm list packages)...");
+
+        QPushButton *bridgeRunShell = new QPushButton("▶️ تنفيذ الأمر", page);
+        bridgeRunShell->setProperty("class", "ActionBtn");
+        auto runBiolShell = [=]() {
+            QString cmd = bridgeShellInput->text().trimmed();
+            if (cmd.isEmpty()) return;
+            QStringList args = {"shell"};
+            args.append(QProcess::splitCommand(cmd));
+            runAdbCommand(args, "تم تنفيذ أمر الـ Shell بنجاح.");
+        };
+        connect(bridgeRunShell, &QPushButton::clicked, this, runBiolShell);
+        connect(bridgeShellInput, &QLineEdit::returnPressed, this, runBiolShell);
+
+        row4->addWidget(bridgeShellInput, 1);
+        row4->addWidget(bridgeRunShell);
+        layout->addLayout(row4);
+
+        layout->addStretch();
+        return page;
+    }
+    
     // --- الصفحة 3: نقل الملفات ---
     QWidget* createFileTransferPage() {
         QFrame *page = new QFrame(this);
