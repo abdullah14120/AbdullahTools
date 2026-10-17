@@ -67,6 +67,12 @@ jobs:
         Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "adb.zip"
         Expand-Archive -Path "adb.zip" -DestinationPath "./dist" -Force
 
+        # 5. تحميل محرك عرض شاشة الجوال والتحكم بها (Scrcpy) ودمجه مع الأداة تلقائياً
+        Invoke-WebRequest -Uri "https://github.com/Genymobile/scrcpy/releases/download/v2.7/scrcpy-win64-v2.7.zip" -OutFile "scrcpy.zip"
+        Expand-Archive -Path "scrcpy.zip" -DestinationPath "scrcpy_temp" -Force
+        New-Item -ItemType Directory -Force -Path "dist/scrcpy"
+        Copy-Item -Path "scrcpy_temp/scrcpy-win64-*/*" -Destination "dist/scrcpy" -Recurse -Force
+
     - name: رفع الأداة الجاهزة للتحميل
       uses: actions/upload-artifact@v4
       with:
