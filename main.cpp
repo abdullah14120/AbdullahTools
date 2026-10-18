@@ -1,3 +1,9 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
 #include <QApplication>
 #include <QMainWindow>
 #include <QWidget>
@@ -831,13 +837,15 @@ private:
     QLineEdit *wirelessQuickPkgInput;
     QLineEdit *wirelessShellInput;
     
-    // عناصر الصفحة 6: التطبيق الوسيط عبر شبكة محلية
+   // عناصر الصفحة 6: التطبيق الوسيط المطور (AT-Bridge v2.0)
     QLineEdit *bridgeIpPortInput;
     QLabel *bridgeStatusLabel;
     QLineEdit *bridgeQuickPkgInput;
     QLineEdit *bridgePushLocalInput;
     QLineEdit *bridgePushRemoteInput;
+    QLineEdit *bridgePullRemoteInput;
     QLineEdit *bridgeShellInput;
+    QLineEdit *bridgeActionInput;
     
     // --- الشريط العلوي ---
     QWidget* createTopBar() {
@@ -1725,184 +1733,571 @@ private:
         }
     }
     
-    // --- الصفحة 6: إدارة الاتصال عبر التطبيق الوسيط عبر شبكة Wi-Fi محلية ---
+// ============================================================================
+    // محرك الاتصال المباشر بالتطبيق الوسيط (AT-Bridge v2.0 Socket Engine)
+    // ============================================================================
+
+    void ensureWinsockInitialized() {
+        static bool initialized = false;
+        if (!initialized) {
+            WSADATA wsaData;
+            WSAStartup(MAKEWORD(2, 2), &wsaData);
+            initialized = true;
+        }
+    }
+
+    // قراءة عنوان IP والمنفذ من الخانة (افتراضياً المنفذ 50555)
+    bool parseBridgeAddress(QString &ipOut, int &portOut) {
+        QString raw = bridgeIpPortInput->text().trimmed();
+        if (raw.isEmpty()) return false;
+        QStringList parts = raw.split(':');
+        ipOut = parts[0].trimmed();
+        portOut = (parts.size() > 1 && parts[1].toInt() > 0) ? parts[1].toInt() : 50555;
+        return !ipOut.isEmpty();
+    }
+
+    // إرسال أمر مباشر للتطبيق الوسيط واستلام الرد النصي فوراً
+    QString sendBridgeCommandSync(const QString &commandLine, int timeoutMs = 8000) {
+        ensureWinsockInitialized();
+        QString ip;
+        int port = 50555;
+        if (!parseBridgeAddress(ip, port)) {
+            return "ERROR: يرجى إدخال عنوان IP أو الضغط على (بحث تلقائي) أولاً!";
+        }
+
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock == INVALID_SOCKET) return "ERROR: تعذر إنشاء Socket على الكمبيوتر.";
+
+        DWORD tv = timeoutMs;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+
+        sockaddr_in serverAddr{};
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(port);
+        inet_pton(AF_INET, ip.toStdString().c_str(), &serverAddr.sin_addr);
+
+        if (::connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+            closesocket(sock);
+            return "ERROR: تعذر الاتصال بالتطبيق الوسيط على " + ip + ":" + QString::number(port) + " (تأكد أن الهاتف والكمبيوتر على نفس الشبكة وأن التطبيق مفتوح).";
+        }
+
+        QByteArray payload = (commandLine + "\n").toUtf8();
+        send(sock, payload.constData(), payload.size(), 0);
+
+        QByteArray response;
+        char buf[8192];
+        int received = 0;
+        while ((received = recv(sock, buf, sizeof(buf), 0)) > 0) {
+            response.append(buf, received);
+        }
+        closesocket(sock);
+        return QString::fromUtf8(response).trimmed();
+    }
+
+    // إرسال ملف ثنائي (APK أو أي ملف) من الكمبيوتر إلى التطبيق الوسيط مباشرة
+    bool sendBridgeFileSync(const QString &headerCommand, const QString &localFilePath, QString &serverReplyOut) {
+        ensureWinsockInitialized();
+        QFile file(localFilePath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            serverReplyOut = "ERROR: تعذر فتح الملف المحلي على الكمبيوتر!";
+            return false;
+        }
+
+        QString ip;
+        int port = 50555;
+        if (!parseBridgeAddress(ip, port)) {
+            file.close();
+            serverReplyOut = "ERROR: عنوان التطبيق الوسيط غير محدد!";
+            return false;
+        }
+
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        DWORD tv = 60000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+
+        sockaddr_in serverAddr{};
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(port);
+        inet_pton(AF_INET, ip.toStdString().c_str(), &serverAddr.sin_addr);
+
+        if (::connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+            file.close();
+            closesocket(sock);
+            serverReplyOut = "ERROR: فشل الاتصال بالهاتف أثناء محاولة إرسال الملف!";
+            return false;
+        }
+
+        // 1. إرسال سطر الترويسة متبوعاً بـ \n
+        QByteArray hdr = (headerCommand + "\n").toUtf8();
+        send(sock, hdr.constData(), hdr.size(), 0);
+
+        // 2. تدفق بايتات الملف مباشرة
+        while (!file.atEnd()) {
+            QByteArray chunk = file.read(65536);
+            int totalSent = 0;
+            while (totalSent < chunk.size()) {
+                int s = send(sock, chunk.constData() + totalSent, chunk.size() - totalSent, 0);
+                if (s <= 0) break;
+                totalSent += s;
+            }
+        }
+        file.close();
+
+        // 3. قراءة رد الهاتف بعد اكتمال النقل
+        QByteArray reply;
+        char buf[4096];
+        int r = 0;
+        while ((r = recv(sock, buf, sizeof(buf), 0)) > 0) {
+            reply.append(buf, r);
+        }
+        closesocket(sock);
+        serverReplyOut = QString::fromUtf8(reply).trimmed();
+        return serverReplyOut.startsWith("OK");
+    }
+
+    // سحب ملف ثنائي (أي ملف أو APK حزمة مثبتة) من الهاتف إلى الكمبيوتر عبر التطبيق الوسيط
+    bool receiveBridgeFileSync(const QString &requestCommand, const QString &saveLocalPath, QString &statusMsgOut) {
+        ensureWinsockInitialized();
+        QString ip;
+        int port = 50555;
+        if (!parseBridgeAddress(ip, port)) {
+            statusMsgOut = "ERROR: عنوان التطبيق الوسيط غير محدد!";
+            return false;
+        }
+
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        DWORD tv = 60000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+
+        sockaddr_in serverAddr{};
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(port);
+        inet_pton(AF_INET, ip.toStdString().c_str(), &serverAddr.sin_addr);
+
+        if (::connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+            closesocket(sock);
+            statusMsgOut = "ERROR: تعذر الاتصال بالهاتف لسحب الملف!";
+            return false;
+        }
+
+        QByteArray req = (requestCommand + "\n").toUtf8();
+        send(sock, req.constData(), req.size(), 0);
+
+        // قراءة ترويسة الرد حرفاً بحرف حتى \n لمعرفة حجم الملف
+        QByteArray headerBytes;
+        char c;
+        while (recv(sock, &c, 1, 0) == 1) {
+            if (c == '\n') break;
+            if (c != '\r') headerBytes.append(c);
+        }
+
+        QString headerStr = QString::fromUtf8(headerBytes);
+        if (!headerStr.startsWith("OK|")) {
+            closesocket(sock);
+            statusMsgOut = headerStr.isEmpty() ? "ERROR: لم يرد الهاتف ببيانات الملف!" : headerStr;
+            return false;
+        }
+
+        qint64 fileSize = headerStr.section('|', 1, 1).toLongLong();
+        QFile outFile(saveLocalPath);
+        if (!outFile.open(QIODevice::WriteOnly)) {
+            closesocket(sock);
+            statusMsgOut = "ERROR: تعذر إنشاء الملف على الكمبيوتر: " + saveLocalPath;
+            return false;
+        }
+
+        char buf[65536];
+        qint64 remaining = fileSize;
+        while (remaining > 0) {
+            int r = recv(sock, buf, (int)qMin<qint64>(sizeof(buf), remaining), 0);
+            if (r <= 0) break;
+            outFile.write(buf, r);
+            remaining -= r;
+        }
+        outFile.close();
+        closesocket(sock);
+
+        statusMsgOut = QString("تم سحب الملف بنجاح (%1 كيلوبايت) إلى: %2").arg(fileSize / 1024).arg(saveLocalPath);
+        return true;
+    }
+
+    // رادار الاكتشاف التلقائي للهاتف عبر الشبكة المحلية (UDP Broadcast 50556)
+    void autoDiscoverBridgeDevice() {
+        ensureWinsockInitialized();
+        appendLog("📡 جاري بث إشارة الرادار على الشبكة المحلية للبحث عن تطبيق AbdullahTool Bridge...", "INFO");
+
+        SOCKET udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (udpSock == INVALID_SOCKET) return;
+
+        BOOL bOpt = TRUE;
+        setsockopt(udpSock, SOL_SOCKET, SO_BROADCAST, (const char*)&bOpt, sizeof(bOpt));
+        DWORD timeout = 1800; // 1.8 ثانية
+        setsockopt(udpSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+
+        sockaddr_in bcastAddr{};
+        bcastAddr.sin_family = AF_INET;
+        bcastAddr.sin_port = htons(50556);
+        bcastAddr.sin_addr.s_addr = INADDR_BROADCAST;
+
+        const char *pingMsg = "AT_DISCOVER";
+        sendto(udpSock, pingMsg, (int)strlen(pingMsg), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
+
+        char recvBuf[1024];
+        sockaddr_in senderAddr{};
+        int senderLen = sizeof(senderAddr);
+        int len = recvfrom(udpSock, recvBuf, sizeof(recvBuf) - 1, 0, (sockaddr*)&senderAddr, &senderLen);
+        closesocket(udpSock);
+
+        if (len > 0) {
+            recvBuf[len] = '\0';
+            QString reply = QString::fromUtf8(recvBuf).trimmed();
+            // الصيغة: AT_HERE|192.168.1.50:50555|Model|AndroidVer|ROOT
+            if (reply.startsWith("AT_HERE|")) {
+                QStringList parts = reply.split('|');
+                QString foundAddr = parts.value(1);
+                QString model = parts.value(2);
+                QString androidVer = parts.value(3);
+                QString rootState = parts.value(4);
+
+                bridgeIpPortInput->setText(foundAddr);
+                bridgeStatusLabel->setText(QString("✔ تم الاكتشاف والربط التلقائي: [%1 - %2 - %3] على العنوان %4")
+                                               .arg(model, androidVer, rootState, foundAddr));
+                bridgeStatusLabel->setStyleSheet("background-color: #0F5223; color: #6DD58C; border-radius: 8px; padding: 10px 14px; font-weight: bold;");
+
+                valModel->setText(model);
+                valAndroid->setText(androidVer);
+                valSerial->setText(foundAddr);
+                connectionBadge->setText("● متصل بالوسيط: " + model);
+                connectionBadge->setStyleSheet("background-color: #0F5223; color: #6DD58C; padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: bold;");
+
+                appendLog("✔ تم العثور على الهاتف تلقائياً: " + model + " (" + foundAddr + ") [" + rootState + "]", "SUCCESS");
+                return;
+            }
+        }
+
+        appendLog("لم يرد أي هاتف تلقائياً. تأكد من فتح تطبيق AbdullahTool Bridge على الهاتف، أو أدخل الـ IP الظاهر في التطبيق يدوياً.", "WARN");
+        bridgeStatusLabel->setText("⚠ لم يتم العثور التلقائي (قد يمنع الراوتر Broadcast). أدخل الـ IP الظاهر في شاشة التطبيق يدوياً واضغط فحص الاتصال.");
+    }
+
+    // --- الصفحة 6: إدارة الاتصال والتحكم الواسع عبر التطبيق الوسيط (AT-Bridge v2.0) ---
     QWidget* createLocalBridgePage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
         QVBoxLayout *layout = new QVBoxLayout(page);
-        layout->setContentsMargins(22, 18, 22, 18);
-        layout->setSpacing(12);
+        layout->setContentsMargins(22, 16, 22, 16);
+        layout->setSpacing(10);
 
-        QLabel *title = new QLabel("🌐 مركز الاتصال عبر التطبيق الوسيط (Local Wi-Fi Bridge للأجهزة غير المدعومة)", page);
+        QHBoxLayout *topHeader = new QHBoxLayout();
+        QLabel *title = new QLabel("🌐 مركز التحكم الشامل عبر التطبيق الوسيط (AT-Bridge v2.0 المباشر)", page);
         title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
-        layout->addWidget(title);
 
-        QLabel *desc = new QLabel(
-            "💡 هذه الطريقة مثالية للأجهزة التي لا تدعم تصحيح الأخطاء اللاسلكي الحديث أو منفذ الـ USB المعطل. "
-            "قم بتشغيل التطبيق الوسيط على الهاتف (ليظهر لك عنوان الـ IP والمنفذ المحلي)، ثم أدخله أدناه واضغط اتصال.",
-            page
-        );
-        desc->setWordWrap(true);
-        desc->setStyleSheet("color: #8E918F; font-size: 12px; line-height: 1.5;");
-        layout->addWidget(desc);
+        QPushButton *autoDiscoverBtn = new QPushButton("📡 بحث والاتصال التلقائي بالهاتف (Auto-Discover)", page);
+        autoDiscoverBtn->setProperty("class", "ActionBtn");
+        connect(autoDiscoverBtn, &QPushButton::clicked, this, &MainWindow::autoDiscoverBridgeDevice);
+
+        topHeader->addWidget(title);
+        topHeader->addStretch();
+        topHeader->addWidget(autoDiscoverBtn);
+        layout->addLayout(topHeader);
 
         // بانر حالة الاتصال الذكي
-        bridgeStatusLabel = new QLabel("● الحالة: غير متصل عبر الوسيط. بانتظار إدخال عنوان الاتصال.", page);
-        bridgeStatusLabel->setStyleSheet("background-color: #131314; color: #FCD34D; border: 1px solid #333537; border-radius: 8px; padding: 10px 14px; font-size: 12px; font-weight: bold;");
+        bridgeStatusLabel = new QLabel("● الحالة: افتح تطبيق (AbdullahTool Bridge) على الهاتف ثم اضغط (بحث والاتصال التلقائي) أو أدخل الـ IP:50555.", page);
+        bridgeStatusLabel->setStyleSheet("background-color: #131314; color: #FCD34D; border: 1px solid #333537; border-radius: 8px; padding: 9px 14px; font-size: 12px; font-weight: bold;");
         layout->addWidget(bridgeStatusLabel);
 
-        // حقل الإدخال وزر الاتصال والفحص الذكي
+        // 1. صف الاتصال المباشر والفحص وتفعيل ADB
         QHBoxLayout *connRow = new QHBoxLayout();
         bridgeIpPortInput = new QLineEdit(page);
-        bridgeIpPortInput->setPlaceholderText("أدخل عنوان IP والمنفذ من التطبيق الوسيط (مثال: 192.168.1.50:5555)");
+        bridgeIpPortInput->setPlaceholderText("عنوان الجسر في التطبيق (مثال: 192.168.1.50:50555)");
 
-        QPushButton *bridgeConnectBtn = new QPushButton("🔌 ربط وفحص الاتصال بالوسيط", page);
+        QPushButton *bridgeConnectBtn = new QPushButton("🔌 اتصال وفحص شامل للجسر", page);
         bridgeConnectBtn->setProperty("class", "ActionBtn");
         connect(bridgeConnectBtn, &QPushButton::clicked, this, [=]() {
-            QString addr = bridgeIpPortInput->text().trimmed();
-            if (addr.isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "يرجى كتابة عنوان IP والمنفذ الخاص بالوسيط أولاً!");
-                return;
+            QString resp = sendBridgeCommandSync("PING");
+            if (resp.startsWith("OK|")) {
+                // OK|Model|AndroidVer|SDK|Bat|ROOT
+                QStringList p = resp.split('|');
+                QString model = p.value(1, "Android");
+                QString ver = p.value(2, "");
+                QString sdk = p.value(3, "");
+                QString bat = p.value(4, "0%");
+                QString root = p.value(5, "NOROOT");
+
+                valModel->setText(model);
+                valAndroid->setText(ver + " (" + sdk + ")");
+                valSerial->setText(bridgeIpPortInput->text().trimmed());
+                batteryBar->setValue(QString(bat).remove('%').toInt());
+
+                bridgeStatusLabel->setText(QString("✔ اتصال مباشر ومؤكّد 100% | الجهاز: %1 | %2 | البطارية: %3 | الصلاحية: %4")
+                                               .arg(model, ver, bat, root));
+                bridgeStatusLabel->setStyleSheet("background-color: #0F5223; color: #6DD58C; border-radius: 8px; padding: 9px 14px; font-weight: bold;");
+                connectionBadge->setText("● متصل بالوسيط: " + model);
+                connectionBadge->setStyleSheet("background-color: #0F5223; color: #6DD58C; padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: bold;");
+                appendLog("✔ نجح فحص الجسر المباشر: " + resp, "SUCCESS");
+            } else {
+                bridgeStatusLabel->setText("✖ " + resp);
+                bridgeStatusLabel->setStyleSheet("background-color: #3C1919; color: #F2B8B5; border-radius: 8px; padding: 9px 14px; font-weight: bold;");
+                appendLog(resp, "ERROR");
             }
-            bridgeStatusLabel->setText("⏳ جاري إنشاء الجسر والتحقق من استجابة الهاتف عبر الوسيط...");
-            bridgeStatusLabel->setStyleSheet("background-color: #3C2F19; color: #FCD34D; border-radius: 8px; padding: 10px 14px; font-weight: bold;");
-
-            // تنفيذ أمر الاتصال الذكي مع فحص استجابة الـ shell فوراً للتأكد من نجاح الرابط
-            runAdbSequence({
-                {{"connect", addr}, "إرسال أمر الربط بالشبكة المحلية...", ""},
-                {{"shell", "getprop", "ro.product.model"}, "فحص استجابة نواة النظام عبر الجسر...", "✔ تم الاتصال بنجاح عبر التطبيق الوسيط وأصبح الهاتف جاهزاً للأوامر!"}
-            });
-
-            // تحديث حالة البانر بعد انتهاء الفحص
-            QTimer::singleShot(2500, this, [=]() {
-                checkDeviceSilently();
-                readFullDeviceInfo();
-                bridgeStatusLabel->setText("✔ متصل بنجاح عبر التطبيق الوسيط وجاهز لتنفيذ المهام.");
-                bridgeStatusLabel->setStyleSheet("background-color: #0F5223; color: #6DD58C; border-radius: 8px; padding: 10px 14px; font-weight: bold;");
-            });
         });
 
-        QPushButton *bridgeDisconnectBtn = new QPushButton("❌ قطع الاتصال", page);
-        bridgeDisconnectBtn->setProperty("class", "DangerBtn");
-        connect(bridgeDisconnectBtn, &QPushButton::clicked, this, [=]() {
-            runAdbCommand({"disconnect"}, "تم قطع الاتصال بالوسيط.");
-            bridgeStatusLabel->setText("● الحالة: تم قطع الاتصال.");
-            bridgeStatusLabel->setStyleSheet("background-color: #282A2C; color: #FCD34D; border-radius: 8px; padding: 10px 14px; font-weight: bold;");
-            checkDeviceSilently();
+        QPushButton *enableAdbdBtn = new QPushButton("⚡ تفعيل منفذ ADB 5555 (للنسخ .ab)", page);
+        enableAdbdBtn->setProperty("class", "SecondaryBtn");
+        connect(enableAdbdBtn, &QPushButton::clicked, this, [=]() {
+            QString resp = sendBridgeCommandSync("ENABLE_ADBD");
+            appendLog("نتيجة تفعيل ADB عبر الوسيط: " + resp, resp.startsWith("OK") ? "SUCCESS" : "WARN");
+            QString ip; int port;
+            if (parseBridgeAddress(ip, port)) {
+                runAdbCommand({"connect", ip + ":5555"}, "تم إرسال طلب ربط محرك ADB على المنفذ 5555.");
+            }
         });
 
         connRow->addWidget(bridgeIpPortInput, 2);
         connRow->addWidget(bridgeConnectBtn);
-        connRow->addWidget(bridgeDisconnectBtn);
+        connRow->addWidget(enableAdbdBtn);
         layout->addLayout(connRow);
 
-        // قسم الميزات والعمليات عبر الاتصال الوسيط (Install / Push / Backup / Restore)
-        QLabel *opsTitle = new QLabel("⚡ العمليات المتاحة عبر الاتصال الوسيط:", page);
-        opsTitle->setStyleSheet("color: #A8C7FA; font-size: 13px; font-weight: bold; margin-top: 10px;");
-        layout->addWidget(opsTitle);
+        // 2. صف إدارة الحزم والتطبيقات عبر الوسيط (تثبيت APK + عرض جميع الحزم + سحب APK أي تطبيق)
+        QLabel *pkgSec = new QLabel("1️⃣ إدارة التطبيقات والنسخ الاحتياطي عبر الجسر المباشر (بدون الحاجة لـ USB):", page);
+        pkgSec->setStyleSheet("color: #A8C7FA; font-size: 13px; font-weight: bold;");
+        layout->addWidget(pkgSec);
 
-        // 1. زر تثبيت APK
         QHBoxLayout *row1 = new QHBoxLayout();
-        QPushButton *bridgeInstallBtn = new QPushButton("📦 تثبيت ملف APK عبر الوسيط (adb install)", page);
-        bridgeInstallBtn->setProperty("class", "SecondaryBtn");
+        QPushButton *bridgeInstallBtn = new QPushButton("📦 إرسال وتثبيت APK عبر الوسيط", page);
+        bridgeInstallBtn->setProperty("class", "ActionBtn");
         connect(bridgeInstallBtn, &QPushButton::clicked, this, [=]() {
-            QString apk = QFileDialog::getOpenFileName(this, "اختر ملف APK للتثبيت", "", "Android Package (*.apk)");
-            if (!apk.isEmpty()) {
-                appendLog("جاري تثبيت التطبيق عبر الجسر المحلي...", "INFO");
-                runAdbCommand({"install", "-r", "-g", apk}, "اكتمل تثبيت التطبيق عبر الوسيط بنجاح.");
+            QString apk = QFileDialog::getOpenFileName(this, "اختر ملف APK لتثبيته عبر الوسيط", "", "Android Package (*.apk)");
+            if (apk.isEmpty()) return;
+            QFileInfo fi(apk);
+            appendLog(QString("جاري إرسال ملف الـ APK (%1 كيلوبايت) مباشرة إلى التطبيق الوسيط وتثبيته...").arg(fi.size() / 1024), "INFO");
+            QString reply;
+            QString hdr = QString("INSTALL|%1|%2").arg(fi.fileName()).arg(fi.size());
+            if (sendBridgeFileSync(hdr, apk, reply)) {
+                appendLog(reply, "SUCCESS");
+            } else {
+                appendLog(reply, "ERROR");
             }
         });
-        row1->addWidget(bridgeInstallBtn);
-        row1->addStretch();
-        layout->addLayout(row1);
 
-        // 2. زر نقل ملفات (ADB Push)
-        QHBoxLayout *row2 = new QHBoxLayout();
-        bridgePushLocalInput = new QLineEdit(page);
-        bridgePushLocalInput->setPlaceholderText("ملف الكمبيوتر للإرسال...");
-        QPushButton *browsePushFile = new QPushButton("📂 استعراض", page);
-        browsePushFile->setProperty("class", "SecondaryBtn");
-        connect(browsePushFile, &QPushButton::clicked, this, [=]() {
-            QString f = QFileDialog::getOpenFileName(this, "اختر ملفاً لنقله للهاتف");
-            if (!f.isEmpty()) bridgePushLocalInput->setText(f);
+        bridgeQuickPkgInput = new QLineEdit("com.whatsapp", page);
+        bridgeQuickPkgInput->setPlaceholderText("اسم الحزمة (مثال: com.whatsapp)");
+        bridgeQuickPkgInput->setFixedWidth(185);
+
+        QPushButton *pullApkBtn = new QPushButton("📥 سحب APK الحزمة للكمبيوتر", page);
+        pullApkBtn->setProperty("class", "SecondaryBtn");
+        connect(pullApkBtn, &QPushButton::clicked, this, [=]() {
+            QString pkg = bridgeQuickPkgInput->text().trimmed();
+            if (pkg.isEmpty()) return;
+            QString savePath = QFileDialog::getSaveFileName(this, "حفظ ملف APK المسحوب", QDir::homePath() + "/Desktop/" + pkg + ".apk", "Android Package (*.apk)");
+            if (savePath.isEmpty()) return;
+            appendLog("جاري سحب ملف الـ APK الأصلي للحزمة " + pkg + " عبر التطبيق الوسيط...", "INFO");
+            QString msg;
+            if (receiveBridgeFileSync("PULL_APK|" + pkg, savePath, msg)) {
+                appendLog(msg, "SUCCESS");
+            } else {
+                appendLog(msg, "ERROR");
+            }
         });
 
-        bridgePushRemoteInput = new QLineEdit("/sdcard/Download/", page);
-        bridgePushRemoteInput->setPlaceholderText("مسار الوجهة في الهاتف...");
+        QPushButton *listAllPkgsBtn = new QPushButton("📋 عرض حزم الهاتف", page);
+        listAllPkgsBtn->setProperty("class", "SecondaryBtn");
+        connect(listAllPkgsBtn, &QPushButton::clicked, this, [=]() {
+            appendLog("جاري جلب قائمة الحزم المثبتة عبر PackageManager من التطبيق الوسيط...", "INFO");
+            QString out = sendBridgeCommandSync("LIST_PKGS");
+            for (const QString &line : out.split('\n', Qt::SkipEmptyParts)) {
+                appendLog(line, "OUTPUT");
+            }
+        });
 
-        QPushButton *bridgePushBtn = new QPushButton("📤 نقل الملف (adb push)", page);
-        bridgePushBtn->setProperty("class", "SecondaryBtn");
+        QPushButton *bridgeBackupBtn = new QPushButton("💾 سحب بيانات الحزمة (Wi-Fi)", page);
+        bridgeBackupBtn->setProperty("class", "SecondaryBtn");
+        connect(bridgeBackupBtn, &QPushButton::clicked, this, [=]() {
+            QString pkg = bridgeQuickPkgInput->text().trimmed();
+            if (pkg.isEmpty()) return;
+            QString out = QFileDialog::getSaveFileName(this, "حفظ نسخة بيانات الحزمة عبر الواي فاي",
+                                                       QDir::homePath() + "/Desktop/" + pkg + ".tar",
+                                                       "Tar Archive (*.tar);;Android Backup (*.ab)");
+            if (out.isEmpty()) return;
+
+            appendLog("جاري سحب بيانات الحزمة (" + pkg + ") مباشرة عبر الواي فاي من التطبيق الوسيط...", "INFO");
+            QString statusMsg;
+            QString tempTar = out.endsWith(".ab", Qt::CaseInsensitive) ? (QDir::tempPath() + "/bridge_pull_tmp.tar") : out;
+
+            if (receiveBridgeFileSync("BACKUP_PKG|" + pkg, tempTar, statusMsg)) {
+                if (out.endsWith(".ab", Qt::CaseInsensitive)) {
+                    // تغليف ملف الـ tar المسحوب بصيغة .ab قياسية
+                    QFile tf(tempTar);
+                    if (tf.open(QIODevice::ReadOnly)) {
+                        QByteArray compressed = qCompress(tf.readAll(), 9).mid(4);
+                        tf.close();
+                        QFile abFile(out);
+                        if (abFile.open(QIODevice::WriteOnly)) {
+                            abFile.write("ANDROID BACKUP\n5\n1\nnone\n");
+                            abFile.write(compressed);
+                            abFile.close();
+                        }
+                    }
+                }
+                appendLog("✔ تم حفظ نسخة الحزمة بنجاح عبر الواي فاي في: " + out, "SUCCESS");
+            } else {
+                appendLog(statusMsg, "ERROR");
+            }
+        });
+
+        QPushButton *bridgeRestoreBtn = new QPushButton("♻️ استعادة وحقن (.ab / .tar) بالواي فاي", page);
+        bridgeRestoreBtn->setProperty("class", "SecondaryBtn");
+        connect(bridgeRestoreBtn, &QPushButton::clicked, this, [=]() {
+            QString pkg = bridgeQuickPkgInput->text().trimmed();
+            if (pkg.isEmpty()) return;
+            QString srcFile = QFileDialog::getOpenFileName(this, "اختر ملف .ab أو .tar لاستعادته عبر الواي فاي", "", "Backup Files (*.ab *.tar)");
+            if (srcFile.isEmpty()) return;
+
+            QString tarToSend = srcFile;
+            if (srcFile.endsWith(".ab", Qt::CaseInsensitive)) {
+                tarToSend = QDir::tempPath() + "/bridge_auto_restore.tar";
+                appendLog("جاري فك ملف (.ab) تلقائياً لإرساله عبر الجسر اللاسلكي...", "INFO");
+                if (!convertAbFileToTar(srcFile, tarToSend)) return;
+            }
+
+            QFileInfo fi(tarToSend);
+            appendLog("جاري إرسال وحقن البيانات في الحزمة (" + pkg + ") مباشرة عبر الواي فاي...", "INFO");
+            QString reply;
+            if (sendBridgeFileSync(QString("RESTORE_PKG|%1|%2").arg(pkg).arg(fi.size()), tarToSend, reply)) {
+                appendLog(reply, "SUCCESS");
+            } else {
+                appendLog(reply, "ERROR");
+            }
+        });
+
+        row1->addWidget(bridgeInstallBtn);
+        row1->addWidget(bridgeQuickPkgInput);
+        row1->addWidget(pullApkBtn);
+        row1->addWidget(listAllPkgsBtn);
+        row1->addWidget(bridgeBackupBtn);
+        row1->addWidget(bridgeRestoreBtn);
+        layout->addLayout(row1);
+
+        // 3. صف نقل وسحب الملفات المباشر عبر Socket الوسيط (Push & Pull بدون ADB)
+        QLabel *fileSec = new QLabel("2️⃣ نقل وسحب الملفات المباشر عبر الجسر (Direct Socket Push & Pull):", page);
+        fileSec->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold;");
+        layout->addWidget(fileSec);
+
+        QHBoxLayout *row2 = new QHBoxLayout();
+        bridgePushLocalInput = new QLineEdit(page);
+        bridgePushLocalInput->setPlaceholderText("اختر ملفاً من الكمبيوتر لإرساله...");
+
+        QPushButton *browsePushFile = new QPushButton("📂 ملف", page);
+        browsePushFile->setProperty("class", "SecondaryBtn");
+        connect(browsePushFile, &QPushButton::clicked, this, [=]() {
+            QString f = QFileDialog::getOpenFileName(this, "اختر ملفاً لإرساله للهاتف");
+            if (!f.isEmpty()) {
+                bridgePushLocalInput->setText(f);
+                bridgePushRemoteInput->setText("/sdcard/Download/" + QFileInfo(f).fileName());
+            }
+        });
+
+        bridgePushRemoteInput = new QLineEdit("/sdcard/Download/file.bin", page);
+        bridgePushRemoteInput->setPlaceholderText("المسار الكامل في الهاتف (مثال: /sdcard/Download/test.zip)");
+
+        QPushButton *bridgePushBtn = new QPushButton("📤 إرسال مباشر للهاتف (Push)", page);
+        bridgePushBtn->setProperty("class", "ActionBtn");
         connect(bridgePushBtn, &QPushButton::clicked, this, [=]() {
             QString local = bridgePushLocalInput->text().trimmed();
             QString remote = bridgePushRemoteInput->text().trimmed();
-            if (local.isEmpty() || remote.isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "حدد ملف الكمبيوتر ومسار الهاتف أولاً!");
-                return;
+            if (local.isEmpty() || remote.isEmpty()) return;
+            QFileInfo fi(local);
+            if (remote.endsWith('/')) remote += fi.fileName();
+            appendLog("جاري إرسال الملف مباشرة عبر الجسر إلى: " + remote, "INFO");
+            QString reply;
+            if (sendBridgeFileSync(QString("PUSH|%1|%2").arg(remote).arg(fi.size()), local, reply)) {
+                appendLog(reply, "SUCCESS");
+            } else {
+                appendLog(reply, "ERROR");
             }
-            appendLog("جاري إرسال الملف عبر الجسر المحلي...", "INFO");
-            runAdbCommand({"push", local, remote}, "تم نقل الملف إلى الهاتف بنجاح.");
+        });
+
+        QPushButton *bridgePullBtn = new QPushButton("📥 سحب هذا المسار للكمبيوتر (Pull)", page);
+        bridgePullBtn->setProperty("class", "SecondaryBtn");
+        connect(bridgePullBtn, &QPushButton::clicked, this, [=]() {
+            QString remote = bridgePushRemoteInput->text().trimmed();
+            if (remote.isEmpty()) return;
+            QString savePath = QFileDialog::getSaveFileName(this, "حفظ الملف المسحوب من الهاتف", QDir::homePath() + "/Desktop/" + QFileInfo(remote).fileName());
+            if (savePath.isEmpty()) return;
+            QString msg;
+            if (receiveBridgeFileSync("PULL|" + remote, savePath, msg)) {
+                appendLog(msg, "SUCCESS");
+            } else {
+                appendLog(msg, "ERROR");
+            }
         });
 
         row2->addWidget(bridgePushLocalInput, 2);
         row2->addWidget(browsePushFile);
         row2->addWidget(bridgePushRemoteInput, 2);
         row2->addWidget(bridgePushBtn);
+        row2->addWidget(bridgePullBtn);
         layout->addLayout(row2);
 
-        // 3. زر سحب نسخة احتياطية (ADB Backup) واستعادة (ADB Restore)
+        // 4. صلاحيات التحكم الواسع (تشغيل تطبيق عن بُعد، فتح رابط، إرسال للحافظة، وأوامر Shell المباشرة)
+        QLabel *ctrlSec = new QLabel("3️⃣ أدوات التحكم الواسع بالهاتف وموجه الأوامر المباشر (Root / Shell / Clipboard / Launch):", page);
+        ctrlSec->setStyleSheet("color: #FCD34D; font-size: 13px; font-weight: bold;");
+        layout->addWidget(ctrlSec);
+
         QHBoxLayout *row3 = new QHBoxLayout();
-        bridgeQuickPkgInput = new QLineEdit("com.whatsapp", page);
-        bridgeQuickPkgInput->setPlaceholderText("اسم الحزمة...");
-        bridgeQuickPkgInput->setFixedWidth(180);
+        bridgeActionInput = new QLineEdit(page);
+        bridgeActionInput->setPlaceholderText("أدخل نصاً لنسخه في حافظة الهاتف، أو رابط URL لفتحه، أو اسم حزمة لتشغيلها...");
 
-        QPushButton *bridgeBackupBtn = new QPushButton("💾 سحب Backup (.ab) للكمبيوتر", page);
-        bridgeBackupBtn->setProperty("class", "SecondaryBtn");
-        connect(bridgeBackupBtn, &QPushButton::clicked, this, [=]() {
-            QString pkg = bridgeQuickPkgInput->text().trimmed();
-            if (pkg.isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "أدخل اسم الحزمة أولاً!");
-                return;
-            }
-            QString out = QFileDialog::getSaveFileName(this, "حفظ النسخة الاحتياطية", QDir::homePath() + "/Desktop/" + pkg + ".ab", "Android Backup (*.ab)");
-            if (!out.isEmpty()) {
-                appendLog("طلب نسخ احتياطي للحزمة " + pkg + " (يرجى الموافقة من شاشة الهاتف)...", "WARN");
-                runAdbCommand({"backup", "-f", out, "-noapk", pkg}, "تم حفظ النسخة الاحتياطية بنجاح.");
-            }
+        QPushButton *sendClipBtn = new QPushButton("📋 إرسال لحافظة الهاتف", page);
+        sendClipBtn->setProperty("class", "SecondaryBtn");
+        connect(sendClipBtn, &QPushButton::clicked, this, [=]() {
+            QString txt = bridgeActionInput->text();
+            if (txt.isEmpty()) return;
+            appendLog(sendBridgeCommandSync("CLIPBOARD_SET|" + txt), "SUCCESS");
         });
 
-        QPushButton *bridgeRestoreBtn = new QPushButton("♻️ استعادة نسخة (.ab) للهاتف", page);
-        bridgeRestoreBtn->setProperty("class", "SecondaryBtn");
-        connect(bridgeRestoreBtn, &QPushButton::clicked, this, [=]() {
-            QString ab = QFileDialog::getOpenFileName(this, "اختر ملف .ab للاستعادة", "", "Android Backup (*.ab)");
-            if (!ab.isEmpty()) {
-                appendLog("بدء استعادة ملف (.ab) عبر الوسيط (وافق من شاشة الهاتف)...", "WARN");
-                runAdbCommand({"restore", ab}, "اكتملت استعادة النسخة الاحتياطية بنجاح.");
-            }
+        QPushButton *openUrlBtn = new QPushButton("🌐 فتح الرابط بالهاتف", page);
+        openUrlBtn->setProperty("class", "SecondaryBtn");
+        connect(openUrlBtn, &QPushButton::clicked, this, [=]() {
+            QString url = bridgeActionInput->text().trimmed();
+            if (url.isEmpty()) return;
+            if (!url.startsWith("http")) url = "https://" + url;
+            appendLog(sendBridgeCommandSync("OPEN_URL|" + url), "SUCCESS");
         });
 
-        row3->addWidget(new QLabel("الحزمة:", page));
-        row3->addWidget(bridgeQuickPkgInput);
-        row3->addWidget(bridgeBackupBtn);
-        row3->addWidget(bridgeRestoreBtn);
-        row3->addStretch();
+        QPushButton *openAppBtn = new QPushButton("🚀 تشغيل التطبيق بالهاتف", page);
+        openAppBtn->setProperty("class", "SecondaryBtn");
+        connect(openAppBtn, &QPushButton::clicked, this, [=]() {
+            QString pkg = bridgeActionInput->text().trimmed().isEmpty() ? bridgeQuickPkgInput->text().trimmed() : bridgeActionInput->text().trimmed();
+            appendLog(sendBridgeCommandSync("OPEN_APP|" + pkg), "SUCCESS");
+        });
+
+        row3->addWidget(bridgeActionInput, 1);
+        row3->addWidget(sendClipBtn);
+        row3->addWidget(openUrlBtn);
+        row3->addWidget(openAppBtn);
         layout->addLayout(row3);
 
-        // سطر أوامر Shell حر عبر الجسر المحلي
+        // سطر أوامر Shell المباشر عبر الجسر (ينفذ بـ su تلقائياً إن توفر روت أو sh بدون روت)
         QHBoxLayout *row4 = new QHBoxLayout();
         bridgeShellInput = new QLineEdit(page);
-        bridgeShellInput->setPlaceholderText("أمر Shell عبر الجسر المحلي (مثال: shell pm list packages)...");
+        bridgeShellInput->setPlaceholderText("اكتب أي أمر نظام ليتم تنفيذه مباشرة داخل تطبيق الوسيط (مثال: df -h أو getprop أو ls -la /sdcard)...");
 
-        QPushButton *bridgeRunShell = new QPushButton("▶️ تنفيذ الأمر", page);
+        QPushButton *bridgeRunShell = new QPushButton("▶️ تنفيذ مباشر في الوسيط", page);
         bridgeRunShell->setProperty("class", "ActionBtn");
-        auto runBiolShell = [=]() {
+        auto execBridgeShell = [=]() {
             QString cmd = bridgeShellInput->text().trimmed();
             if (cmd.isEmpty()) return;
-            QStringList args = {"shell"};
-            args.append(QProcess::splitCommand(cmd));
-            runAdbCommand(args, "تم تنفيذ أمر الـ Shell بنجاح.");
+            appendLog("إرسال أمر للوسيط: " + cmd, "INFO");
+            QString out = sendBridgeCommandSync("SHELL|" + cmd, 15000);
+            for (const QString &line : out.split('\n', Qt::SkipEmptyParts)) {
+                appendLog(line, line.startsWith("ERROR:") ? "ERROR" : "OUTPUT");
+            }
         };
-        connect(bridgeRunShell, &QPushButton::clicked, this, runBiolShell);
-        connect(bridgeShellInput, &QLineEdit::returnPressed, this, runBiolShell);
+        connect(bridgeRunShell, &QPushButton::clicked, this, execBridgeShell);
+        connect(bridgeShellInput, &QLineEdit::returnPressed, this, execBridgeShell);
 
         row4->addWidget(bridgeShellInput, 1);
         row4->addWidget(bridgeRunShell);
