@@ -2389,6 +2389,7 @@ private:
     }
 
     // --- الصفحة 4: موجه الأوامر المتقدم ---
+  // --- الصفحة 4: موجه الأوامر المتقدم (مصحح ويدعم الأوامر المباشرة + 5 أزرار إضافية) ---
     QWidget* createShellTerminalPage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
@@ -2402,7 +2403,7 @@ private:
 
         QHBoxLayout *cmdRow = new QHBoxLayout();
         customShellInput = new QLineEdit(page);
-        customShellInput->setPlaceholderText("اكتب أي أمر Shell أو ADB هنا (مثال: shell dumpsys battery)...");
+        customShellInput->setPlaceholderText("اكتب أي أمر Shell مباشرة (مثال: dumpsys battery أو pm list packages)...");
 
         QPushButton *runCmdBtn = new QPushButton("▶️ تنفيذ الأمر", page);
         runCmdBtn->setProperty("class", "ActionBtn");
@@ -2410,9 +2411,38 @@ private:
         auto executeCustom = [=]() {
             QString raw = customShellInput->text().trimmed();
             if (raw.isEmpty()) return;
-            appendLog("تنفيذ أمر: adb " + raw, "INFO");
-            QStringList parts = QProcess::splitCommand(raw);
-            runAdbCommand(parts, "انتهى تنفيذ الأمر.");
+
+            // 1. إزالة كلمة adb من البداية إن قام المستخدم بكتابتها
+            if (raw.startsWith("adb ", Qt::CaseInsensitive)) {
+                raw = raw.mid(4).trimmed();
+            }
+
+            // 2. التحقق مما إذا كان الأمر من أوامر ADB الرئيسية أم أمر Shell داخلي
+            QStringList topLevelAdbCmds = {
+                "devices", "connect", "disconnect", "pair", "push", "pull",
+                "install", "uninstall", "backup", "restore", "reboot",
+                "tcpip", "kill-server", "start-server", "root", "remount",
+                "logcat", "forward", "reverse", "wait-for-device"
+            };
+
+            QString firstWord = raw.section(' ', 0, 0).toLower();
+            QStringList finalArgs;
+
+            if (firstWord == "shell") {
+                // إذا كتب المستخدم shell في البداية، نمرر ما بعدها كأمر شل كامل
+                QString shellCmd = raw.mid(5).trimmed();
+                if (shellCmd.isEmpty()) return;
+                finalArgs << "shell" << shellCmd;
+            } else if (topLevelAdbCmds.contains(firstWord)) {
+                // إذا كان أمر ADB مباشر مثل reboot أو install
+                finalArgs = QProcess::splitCommand(raw);
+            } else {
+                // إذا كتب أمر شل مباشرة (مثل ls أو pm أو input keyevent) نضيف "shell" تلقائياً
+                finalArgs << "shell" << raw;
+            }
+
+            appendLog("تنفيذ أمر: adb " + finalArgs.join(" "), "INFO");
+            runAdbCommand(finalArgs, "انتهى تنفيذ الأمر.");
         };
 
         connect(runCmdBtn, &QPushButton::clicked, this, executeCustom);
@@ -2426,28 +2456,43 @@ private:
         quickLbl->setStyleSheet("color: #C4C7C5; font-size: 12px; font-weight: bold; margin-top: 6px;");
         layout->addWidget(quickLbl);
 
-        QHBoxLayout *quickRow = new QHBoxLayout();
-        auto addQuickBtn = [&](const QString &text, const QStringList &adbArgs) {
+        // الصف الأول من الأزرار السريعة (الأزرار الـ 4 الأساسية)
+        QHBoxLayout *quickRow1 = new QHBoxLayout();
+        quickRow1->setSpacing(8);
+
+        auto addQuickBtnToRow = [&](QHBoxLayout *targetRow, const QString &text, const QStringList &adbArgs) {
             QPushButton *b = new QPushButton(text, page);
             b->setProperty("class", "SecondaryBtn");
+            b->setCursor(Qt::PointingHandCursor);
             connect(b, &QPushButton::clicked, this, [=]() {
                 appendLog("تشغيل الأداة السريعة: " + text, "INFO");
                 runAdbCommand(adbArgs, "تم التنفيذ بنجاح.");
             });
-            quickRow->addWidget(b);
+            targetRow->addWidget(b);
         };
 
-        addQuickBtn("💾 فحص المساحة التخزينية", {"shell", "df", "-h", "/data"});
-        addQuickBtn("🌐 عرض عنوان IP والشبكة", {"shell", "ip", "addr", "show", "wlan0"});
-        addQuickBtn("🧠 معلومات المعالج والرام", {"shell", "cat", "/proc/meminfo"});
-        addQuickBtn("🔒 ضغط زر الباور (إيقاظ/قفل)", {"shell", "input", "keyevent", "26"});
+        addQuickBtnToRow(quickRow1, "💾 فحص المساحة التخزينية", {"shell", "df -h /data"});
+        addQuickBtnToRow(quickRow1, "🌐 عرض عنوان IP والشبكة", {"shell", "ip addr show wlan0"});
+        addQuickBtnToRow(quickRow1, "🧠 معلومات المعالج والرام", {"shell", "cat /proc/meminfo"});
+        addQuickBtnToRow(quickRow1, "🔒 ضغط زر الباور (إيقاظ/قفل)", {"shell", "input keyevent 26"});
+        layout->addLayout(quickRow1);
 
-        layout->addLayout(quickRow);
+        // الصف الثاني: 5 أزرار جديدة بأسماء وهمية يمكنك تعديل اسمها وأمر الـ Shell الخاص بها لاحقاً
+        QHBoxLayout *quickRow2 = new QHBoxLayout();
+        quickRow2->setSpacing(8);
+
+        addQuickBtnToRow(quickRow2, "🛠️ أمر مخصص 1", {"shell", "input keyevent 3"});
+        addQuickBtnToRow(quickRow2, "🛠️ أمر مخصص 2", {"shell", "input keyevent 4"});
+        addQuickBtnToRow(quickRow2, "🛠️ أمر مخصص 3", {"shell", "input keyevent 82"});
+        addQuickBtnToRow(quickRow2, "🛠️ أمر مخصص 4", {"shell", "getprop ro.serialno"});
+        addQuickBtnToRow(quickRow2, "🛠️ أمر مخصص 5", {"shell", "dumpsys battery"});
+        layout->addLayout(quickRow2);
+
         layout->addStretch();
         return page;
     }
 
-    // --- لوحة سجل العمليات السفلية ---
+    // --- لوحة سجل العمليات السفلية (مصححة لمنع اختفاء الأسطر الأخيرة عند الامتلاء) ---
     QWidget* createConsolePanel() {
         QFrame *panel = new QFrame(this);
         panel->setObjectName("Card");
@@ -2478,6 +2523,10 @@ private:
         consoleBox = new QTextEdit(panel);
         consoleBox->setReadOnly(true);
         consoleBox->setLayoutDirection(Qt::LeftToRight);
+        // ضبط الهامش الداخلي برمجياً بدلاً من CSS padding لحل مشكلة قص الأسطر الأخيرة في Qt
+        consoleBox->document()->setDocumentMargin(10);
+        consoleBox->document()->setMaximumBlockCount(2000);
+
         consoleBox->setStyleSheet(R"(
             QTextEdit {
                 background-color: #131314;
@@ -2486,7 +2535,24 @@ private:
                 border-radius: 10px;
                 font-family: 'IBM Plex Sans Arabic', 'Consolas', monospace;
                 font-size: 12px;
-                padding: 10px;
+                padding: 0px;
+            }
+            QScrollBar:vertical {
+                background: #18191B;
+                width: 10px;
+                margin: 2px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #333537;
+                min-height: 24px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #A8C7FA;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         )");
 
@@ -2495,7 +2561,7 @@ private:
 
         return panel;
     }
-
+    
     // ============================================================================
     // الدوال البرمجية لتحويل ملفات .ab واستعادة بيانات الحزم (/data/data/<pkg>)
     // ============================================================================
@@ -2934,11 +3000,18 @@ private:
         else if (level == "ERROR") { color = "#F2B8B5"; icon = "✖"; }
         else if (level == "OUTPUT") { color = "#E3E3E3"; icon = "│"; }
 
-        QString html = QString("<span style='color:#8E918F;'>[%1]</span> <span style='color:%2; font-weight:600;'>%3 %4</span>")
+        QString html = QString("<div style='line-height:1.45; margin-bottom:2px;'>"
+                               "<span style='color:#8E918F;'>[%1]</span> "
+                               "<span style='color:%2; font-weight:600;'>%3 %4</span>"
+                               "</div>")
                            .arg(timeStr, color, icon, message.toHtmlEscaped());
-        consoleBox->append(html);
-    }
 
+        consoleBox->append(html);
+        // تحريك المؤشر دائماً إلى نهاية السجل لإظهار الأسطر الأخيرة بالكامل
+        consoleBox->moveCursor(QTextCursor::End);
+        consoleBox->ensureCursorVisible();
+    }
+    
     void runAdbSequence(const QList<AdbStep> &steps) {
         for (const AdbStep &s : steps) {
             stepQueue.enqueue(s);
