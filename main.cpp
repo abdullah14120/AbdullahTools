@@ -1157,6 +1157,7 @@ private:
     }
 
     // --- الصفحة 2: النسخ الاحتياطي (.ab) ومحرر XML وقائمة الحزم المستهدفة ---
+// --- الصفحة 2: النسخ الاحتياطي (.ab) وتنظيف المجلدات ومحرر XML وضغط ZIP المباشر ---
     QWidget* createBackupRestorePage() {
         QFrame *page = new QFrame(this);
         page->setObjectName("Card");
@@ -1164,7 +1165,7 @@ private:
         layout->setContentsMargins(22, 18, 22, 18);
         layout->setSpacing(12);
 
-        QLabel *title = new QLabel("🧬 استوديو النسخ الاحتياطي ومحرر ملفات XML واستعادة بيانات الحزم (/data/data)", page);
+        QLabel *title = new QLabel("🧬 استوديو النسخ الاحتياطي وتنظيف المجلدات ومحرر XML وضغط (ZIP / data)", page);
         title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
         layout->addWidget(title);
 
@@ -1175,7 +1176,7 @@ private:
 
         QHBoxLayout *backupRow = new QHBoxLayout();
         backupPkgInput = new QLineEdit(page);
-        backupPkgInput->setPlaceholderText("اسم الحزمة المراد نسخها (مثال: com.uu)");
+        backupPkgInput->setPlaceholderText("اسم الحزمة المراد نسخها (مثال: com.whatsapp)");
 
         backupOutPathInput = new QLineEdit(QDir::homePath() + "/Desktop/backup.ab", page);
         QPushButton *browseBackupOutBtn = new QPushButton("حفظ باسم...", page);
@@ -1209,8 +1210,8 @@ private:
         backupRow->addWidget(doBackupBtn);
         layout->addLayout(backupRow);
 
-        // 2. فك .ab وتحديد الحزمة الأصلية تلقائياً
-        QLabel *sec2 = new QLabel("2️⃣ تحويل ملف (.ab) إلى (.tar) واكتشاف الحزمة الأصلية تلقائياً:", page);
+        // 2. فك .ab وتنظيف المجلدات (f->files, db->databases, sp->shared_prefs, وحذف r و decompressed)
+        QLabel *sec2 = new QLabel("2️⃣ تحويل (.ab) إلى (.tar) مع ترتيب أسماء المجلدات وحذف (r) و (decompressed) تلقائياً:", page);
         sec2->setStyleSheet("color: #FCD34D; font-size: 13px; font-weight: bold; margin-top: 6px;");
         layout->addWidget(sec2);
 
@@ -1233,7 +1234,7 @@ private:
         tarOutputInput = new QLineEdit(page);
         tarOutputInput->setPlaceholderText("مسار ملف .tar الناتج...");
 
-        QPushButton *convertAbBtn = new QPushButton("⚙️ فك واكتشاف الحزمة", page);
+        QPushButton *convertAbBtn = new QPushButton("⚙️ فك وترتيب المجلدات", page);
         convertAbBtn->setProperty("class", "SecondaryBtn");
         connect(convertAbBtn, &QPushButton::clicked, this, [=]() {
             QString inAb = abFileInput->text().trimmed();
@@ -1243,14 +1244,32 @@ private:
                 return;
             }
             if (convertAbFileToTar(inAb, outTar)) {
-                restoreSourceInput->setText(outTar);
-                // اكتشاف اسم الحزمة الأصلي تلقائياً من الأرشيف
-                detectedOriginalPkg = detectOriginalPackageFromTar(outTar);
+                // استخراج وتنظيف المجلدات فوراً وترتيبها بأسمائها الكاملة
+                QString cleanStage = QDir::tempPath() + "/abdullah_clean_stage";
+                QDir(cleanStage).removeRecursively();
+                QDir().mkpath(cleanStage);
+                extractTarLocally(outTar, cleanStage);
+
+                // اكتشاف الحزمة قبل التسطيح
+                if (detectedOriginalPkg.isEmpty()) {
+                    detectedOriginalPkg = detectOriginalPackageFromStageOrTar(cleanStage, outTar);
+                }
+
+                // ترتيب المجلدات (f->files, db->databases, sp->shared_prefs) وحذف r و decompressed
+                normalizeAndCleanStageDirectory(cleanStage);
+
+                // إعادة حفظ ملف الـ .tar الناتج بالمجلدات المرتبة النظيفة حتى يظهر مرتباً خارج الأداة أيضاً
+                rebuildCleanTarFromStage(cleanStage, outTar);
+                restoreSourceInput->setText(cleanStage);
+
                 if (!detectedOriginalPkg.isEmpty()) {
-                    appendLog("✔ تم اكتشاف اسم الحزمة الأصلية تلقائياً بنجاح: " + detectedOriginalPkg, "SUCCESS");
-                    QMessageBox::information(this, "اكتشاف الحزمة", "تم اكتشاف الحزمة الأصلية تلقائياً:\n" + detectedOriginalPkg);
+                    appendLog("✔ تم ترتيب المجلدات وحذف الزوائد واكتشاف الحزمة الأصلية: " + detectedOriginalPkg, "SUCCESS");
+                    QMessageBox::information(this, "اكتمل الترتيب والاكتشاف",
+                        "✔ تم تحويل المجلدات إلى (files, databases, shared_prefs)\n"
+                        "✔ تم حذف مجلد (r) ومحتويات (decompressed)\n"
+                        "📦 الحزمة الأصلية المكتشفة: " + detectedOriginalPkg);
                 } else {
-                    appendLog("لم يتم التعرف على اسم الحزمة الأصلية تلقائياً.", "WARN");
+                    appendLog("✔ تم فك وترتيب المجلدات وحذف الزوائد بنجاح.", "SUCCESS");
                 }
             }
         });
@@ -1261,8 +1280,8 @@ private:
         unpackRow->addWidget(convertAbBtn);
         layout->addLayout(unpackRow);
 
-        // 3. محرر ملفات الـ XML المتقدم قبل الحقن
-        QLabel *sec3 = new QLabel("3️⃣ مراجعة، إعادة تسمية، وتعديل محتوى ملفات الـ XML المستخرجة:", page);
+        // 3. محرر ملفات الـ XML المتقدم بعد الترتيب والتنظيف
+        QLabel *sec3 = new QLabel("3️⃣ مراجعة وتعديل ملفات الـ XML وتنظيف المجلدات يدوياً أو تلقائياً:", page);
         sec3->setStyleSheet("color: #38BDF8; font-size: 13px; font-weight: bold; margin-top: 6px;");
         layout->addWidget(sec3);
 
@@ -1272,33 +1291,50 @@ private:
         connect(openXmlEditorBtn, &QPushButton::clicked, this, [=]() {
             QString src = restoreSourceInput->text().trimmed();
             if (src.isEmpty()) {
-                QMessageBox::warning(this, "تنبيه", "يرجى تحديد ملف .tar أو مجلد البيانات أولاً!");
+                QMessageBox::warning(this, "تنبيه", "يرجى تحديد ملف (.ab / .tar) أو مجلد البيانات أولاً!");
                 return;
             }
-            // فك الـ tar مؤقتاً في مجلد مؤقت محلي على الكمبيوتر إذا كان ملف tar لتعديل محتواه
-            QString tempStage = QDir::tempPath() + "/abdullah_xml_editor_stage";
-            QDir(tempStage).removeRecursively();
-            QDir().mkpath(tempStage);
 
-            if (src.endsWith(".tar", Qt::CaseInsensitive)) {
-                // استخراج محتوى tar محلياً عبر أداة استخراج أو قراءة بسيطة
-                extractTarLocally(src, tempStage);
-            } else if (QFileInfo(src).isDir()) {
-                copyDirectoryRecursively(src, tempStage);
+            QString tempStage = prepareCleanWorkingStage(src);
+            if (tempStage.isEmpty()) return;
+
+            // تحويل الحزمة تلقائياً إلى الحزمة المختارة في القائمة المنسدلة قبل فتح المحرر لمعاينتها جاهزة
+            QString targetPkg = restoreTargetPkgCombo->currentText().trimmed();
+            if (!targetPkg.isEmpty()) {
+                adaptXmlFilesForTargetPackage(tempStage, detectedOriginalPkg, targetPkg);
             }
 
             XmlEditorDialog editor(tempStage, detectedOriginalPkg, this);
             if (editor.exec() == QDialog::Accepted) {
                 restoreSourceInput->setText(tempStage);
-                appendLog("تم حفظ تعديلات ملفات الـ XML وتحديد المجلد المعدل للاستعادة.", "SUCCESS");
+                appendLog("✔ تم حفظ تعديلات الـ XML وترتيب المجلدات بنجاح.", "SUCCESS");
             }
         });
+
+        QPushButton *autoCleanXmlBtn = new QPushButton("🧹 ترتيب المجلدات وتحديث XML للحزمة المختارة فوراً", page);
+        autoCleanXmlBtn->setProperty("class", "SecondaryBtn");
+        connect(autoCleanXmlBtn, &QPushButton::clicked, this, [=]() {
+            QString src = restoreSourceInput->text().trimmed();
+            QString targetPkg = restoreTargetPkgCombo->currentText().trimmed();
+            if (src.isEmpty() || targetPkg.isEmpty()) {
+                QMessageBox::warning(this, "تنبيه", "حدد ملف/مجلد المصدر واختر الحزمة الهدف من القائمة المنسدلة أولاً!");
+                return;
+            }
+            QString stage = prepareCleanWorkingStage(src);
+            if (!stage.isEmpty()) {
+                adaptXmlFilesForTargetPackage(stage, detectedOriginalPkg, targetPkg);
+                restoreSourceInput->setText(stage);
+                appendLog("✔ تم تنظيف المجلدات وتعديل محتوى وأسماء ملفات XML لتطابق الحزمة: " + targetPkg, "SUCCESS");
+            }
+        });
+
         editorRow->addWidget(openXmlEditorBtn);
+        editorRow->addWidget(autoCleanXmlBtn);
         editorRow->addStretch();
         layout->addLayout(editorRow);
 
-        // 4. استعادة وحقن البيانات مع القائمة المنسدلة للحزم الهدف (5 أسماء حزم وهمية مسبقة + إمكانية الكتابة)
-        QLabel *sec4 = new QLabel("4️⃣ استعادة وحقن البيانات إلى الحزمة الهدف مع القائمة المنسدلة:", page);
+        // 4. استعادة أو ضغط البيانات بصيغة ZIP مباشر للحزمة المختارة من القائمة المنسدلة (5 حزم)
+        QLabel *sec4 = new QLabel("4️⃣ اختيار الحزمة الهدف لحفظها كملف (ZIP) مباشر للكمبيوتر أو حقنها في الهاتف:", page);
         sec4->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold; margin-top: 6px;");
         layout->addWidget(sec4);
 
@@ -1313,9 +1349,9 @@ private:
             if (!f.isEmpty()) restoreSourceInput->setText(f);
         });
 
-        // القائمة المنسدلة الجديدة للحزم الهدف (5 أسماء حزم وهمية للاختبار + قابلة للتعديل والتحرير)
+        // القائمة المنسدلة للحزم الـ 5 (مع إمكانية الكتابة اليدوية)
         restoreTargetPkgCombo = new QComboBox(page);
-        restoreTargetPkgCombo->setEditable(true); // يتيح للمستخدم الكتابة اليدوية أو الاختيار
+        restoreTargetPkgCombo->setEditable(true);
         restoreTargetPkgCombo->addItems({
             "com.whatsapp",
             "com.universe.messenger",
@@ -1323,24 +1359,42 @@ private:
             "com.android.ab",
             "com.android.meta"
         });
-        restoreTargetPkgCombo->setFixedWidth(210);
+        restoreTargetPkgCombo->setFixedWidth(205);
 
-        QPushButton *doRestoreBtn = new QPushButton("🚀 حقن مباشر (data/data)", page);
-        doRestoreBtn->setProperty("class", "ActionBtn");
-        connect(doRestoreBtn, &QPushButton::clicked, this, [=]() {
-            restoreDataToPackage(restoreSourceInput->text().trimmed(), restoreTargetPkgCombo->currentText().trimmed());
+        // الزر الجديد: تعديل الـ XML وضغط المجلدات مباشرة بصيغة ZIP بدون أفرع وحفظها على الكمبيوتر
+        QPushButton *exportZipBtn = new QPushButton("🗜️ ضغط وحفظ (ZIP) مباشر", page);
+        exportZipBtn->setProperty("class", "ActionBtn");
+        connect(exportZipBtn, &QPushButton::clicked, this, [=]() {
+            exportCleanedPackageToZip(restoreSourceInput->text().trimmed(), restoreTargetPkgCombo->currentText().trimmed());
         });
 
-        QPushButton *doAbRestoreBtn = new QPushButton("📦 إعادة حزم (.ab) واستعادة", page);
+        QPushButton *doRestoreBtn = new QPushButton("🚀 حقن (data/data)", page);
+        doRestoreBtn->setProperty("class", "SecondaryBtn");
+        connect(doRestoreBtn, &QPushButton::clicked, this, [=]() {
+            QString stage = prepareCleanWorkingStage(restoreSourceInput->text().trimmed());
+            if (!stage.isEmpty()) {
+                QString targetPkg = restoreTargetPkgCombo->currentText().trimmed();
+                adaptXmlFilesForTargetPackage(stage, detectedOriginalPkg, targetPkg);
+                restoreDataToPackage(stage, targetPkg);
+            }
+        });
+
+        QPushButton *doAbRestoreBtn = new QPushButton("📦 استعادة (.ab)", page);
         doAbRestoreBtn->setProperty("class", "SecondaryBtn");
         connect(doAbRestoreBtn, &QPushButton::clicked, this, [=]() {
-            repackAndRestoreAb(restoreSourceInput->text().trimmed(), restoreTargetPkgCombo->currentText().trimmed());
+            QString stage = prepareCleanWorkingStage(restoreSourceInput->text().trimmed());
+            if (!stage.isEmpty()) {
+                QString targetPkg = restoreTargetPkgCombo->currentText().trimmed();
+                adaptXmlFilesForTargetPackage(stage, detectedOriginalPkg, targetPkg);
+                repackAndRestoreAb(stage, targetPkg);
+            }
         });
 
         restoreRow->addWidget(restoreSourceInput, 2);
         restoreRow->addWidget(browseTarBtn);
-        restoreRow->addWidget(new QLabel("الحزمة الهدف:", page));
+        restoreRow->addWidget(new QLabel("الحزمة:", page));
         restoreRow->addWidget(restoreTargetPkgCombo);
+        restoreRow->addWidget(exportZipBtn);
         restoreRow->addWidget(doRestoreBtn);
         restoreRow->addWidget(doAbRestoreBtn);
         layout->addLayout(restoreRow);
@@ -1349,34 +1403,45 @@ private:
         return page;
     }
 
-    // --- اكتشاف اسم الحزمة الأصلي تلقائياً من هيكل ملف الـ tar ---
-    QString detectOriginalPackageFromTar(const QString &tarPath) {
-        QProcess proc;
-        proc.start(getAdbExecutablePath(), {"shell", " tar -tf " + tarPath}); // محاكاة أو استخدام أمر محلي إن توفر
-        // بدلاً من الاعتماد على adb للتفتیش المحلي، نقوم بقراءة أول 50 سطر من محتويات ملف tar محلياً إن أمكن أو عبر أمر بسيط
-        // طريقة برمجية نقية عبر فحص رؤوس tar محلياً أو تخزينها مؤقتاً:
-        QFile file(tarPath);
-        if (!file.open(QIODevice::ReadOnly)) return QString();
-
-        // قراءة عينة من ملف الـ tar للبحث عن نمط apps/COM.NAME/
-        QByteArray sample = file.read(512 * 200); // أول 100 كيلوبايت
-        file.close();
-
-        QRegularExpression rx("apps/([a-zA-Z0-9_]+\\.[a-zA-Z0-9_\\.]+)/");
-        QRegularExpressionMatch match = rx.match(QString::fromUtf8(sample));
-        if (match.hasMatch()) {
-            return match.captured(1);
+    // --- اكتشاف اسم الحزمة الأصلي من ملف الـ tar أو من أسماء ملفات shared_prefs ---
+    QString detectOriginalPackageFromStageOrTar(const QString &stageDir, const QString &tarPath = QString()) {
+        // 1. فحص مجلد apps/<pkg> إن وجد
+        QDir appsDir(stageDir + "/apps");
+        if (appsDir.exists()) {
+            QStringList pkgs = appsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+            if (!pkgs.isEmpty()) return pkgs.first();
         }
-        return QString();
+
+        // 2. فحص ملفات *_preferences_light.xml أو *_preferences.xml داخل sp أو shared_prefs
+        QDirIterator it(stageDir, QStringList() << "*_preferences*.xml", QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            it.next();
+            QString fName = it.fileName();
+            int idx = fName.indexOf("_preferences");
+            if (idx > 0) {
+                return fName.left(idx);
+            }
+        }
+
+        // 3. فحص بايتات ملف الـ tar مباشرة إن توفر
+        if (!tarPath.isEmpty() && QFile::exists(tarPath)) {
+            QFile file(tarPath);
+            if (file.open(QIODevice::ReadOnly)) {
+                QByteArray sample = file.read(512 * 200);
+                file.close();
+                QRegularExpression rx("apps/([a-zA-Z0-9_]+\\.[a-zA-Z0-9_\\.]+)/");
+                QRegularExpressionMatch match = rx.match(QString::fromUtf8(sample));
+                if (match.hasMatch()) return match.captured(1);
+            }
+        }
+        return "com.whatsapp"; // افتراضي عند عدم العثور
     }
 
-    // استخراج tar محلياً في مجلد مؤقت على الكمبيوتر للتعديل عبر محرر XML
+    // --- استخراج tar محلياً على الكمبيوتر ---
     void extractTarLocally(const QString &tarPath, const QString &destDir) {
-        // يتم استخدام الأداة أو فك تدفق البايتات المبسط
-        // لتجنب الاعتماد الخارجي، نعتمد على استدعاء 7z أو tar إن وجد، أو نسخ الملف واستخدامه
         QProcess p;
         p.start("tar", QStringList() << "-xf" << tarPath << "-C" << destDir);
-        p.waitForFinished(3000);
+        p.waitForFinished(8000);
     }
 
     void copyDirectoryRecursively(const QString &fromDir, const QString &toDir) {
@@ -1388,11 +1453,352 @@ private:
             if (QFileInfo(filePath).isDir()) {
                 QDir().mkpath(toDir + "/" + relPath);
             } else {
+                QFile::remove(toDir + "/" + relPath);
                 QFile::copy(filePath, toDir + "/" + relPath);
             }
         }
     }
 
+    // --- دالة الترتيب والتنظيف الشامل: تحويل (f->files, db->databases, sp->shared_prefs) وحذف (r) و (decompressed) ---
+    void normalizeAndCleanStageDirectory(const QString &stageDir) {
+        QDir root(stageDir);
+        if (!root.exists()) return;
+
+        // 1. إذا كانت الملفات داخل apps/<pkg>/ ننقلها مباشرة إلى الجذر ونحذف مجلد apps بالكامل
+        QDir appsDir(stageDir + "/apps");
+        if (appsDir.exists()) {
+            QStringList subPkgs = appsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+            if (!subPkgs.isEmpty()) {
+                QString pkgRoot = appsDir.absoluteFilePath(subPkgs.first());
+                if (detectedOriginalPkg.isEmpty()) detectedOriginalPkg = subPkgs.first();
+
+                QString tempMove = stageDir + "_flat_tmp";
+                QDir(tempMove).removeRecursively();
+                copyDirectoryRecursively(pkgRoot, tempMove);
+                root.removeRecursively();
+                QDir().mkpath(stageDir);
+                copyDirectoryRecursively(tempMove, stageDir);
+                QDir(tempMove).removeRecursively();
+            } else {
+                appsDir.removeRecursively();
+            }
+        }
+
+        // 2. حذف ملف _manifest ومجلد (r) وجميع محتوياته نهائياً
+        QFile::remove(stageDir + "/_manifest");
+        QDir(stageDir + "/r").removeRecursively();
+
+        // 3. دالة مساعدة لدمج/إعادة تسمية المجلدات المختصرة إلى أسمائها الكاملة الصريحة
+        auto renameOrMergeFolder = [&](const QString &shortName, const QString &fullName) {
+            QString srcPath = stageDir + "/" + shortName;
+            QString dstPath = stageDir + "/" + fullName;
+            if (QDir(srcPath).exists()) {
+                if (!QDir(dstPath).exists()) {
+                    root.rename(shortName, fullName);
+                } else {
+                    copyDirectoryRecursively(srcPath, dstPath);
+                    QDir(srcPath).removeRecursively();
+                }
+            }
+        };
+
+        renameOrMergeFolder("f", "files");
+        renameOrMergeFolder("file", "files");
+        renameOrMergeFolder("db", "databases");
+        renameOrMergeFolder("sp", "shared_prefs");
+
+        // 4. حذف محتويات مجلد files/decompressed و file/decompressed بالكامل
+        QStringList decompressedPaths = {
+            stageDir + "/files/decompressed",
+            stageDir + "/file/decompressed"
+        };
+        for (const QString &decPath : decompressedPaths) {
+            if (QDir(decPath).exists()) {
+                QDir(decPath).removeRecursively();
+                appendLog("🧹 تم حذف محتويات المجلد الزائد: " + QDir(stageDir).relativeFilePath(decPath), "INFO");
+            }
+        }
+    }
+
+    // --- تعديل محتوى وأسماء ملفات الـ XML (مثل com.whatsapp_preferences_light.xml) لتطابق الحزمة المختارة ---
+    void adaptXmlFilesForTargetPackage(const QString &stageDir, const QString &oldPkgHint, const QString &targetPkg) {
+        if (targetPkg.isEmpty()) return;
+
+        // تحديد اسم الحزمة القديم بدقة (سواء من المكتشف أو من اسم ملف _preferences_light.xml الحالي)
+        QString oldPkg = oldPkgHint;
+        QDirIterator detectIt(stageDir, QStringList() << "*_preferences*.xml", QDir::Files, QDirIterator::Subdirectories);
+        while (detectIt.hasNext()) {
+            detectIt.next();
+            QString fn = detectIt.fileName();
+            int idx = fn.indexOf("_preferences");
+            if (idx > 0) {
+                QString candidate = fn.left(idx);
+                if (candidate != targetPkg) {
+                    oldPkg = candidate;
+                    break;
+                }
+            }
+        }
+        if (oldPkg.isEmpty()) oldPkg = "com.whatsapp";
+
+        // جمع جميع ملفات الـ XML داخل shared_prefs (أو في المجلد المستخرج)
+        QStringList xmlFiles;
+        QDirIterator it(stageDir, QStringList() << "*.xml", QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            xmlFiles << it.next();
+        }
+
+        int updatedFilesCount = 0;
+        for (const QString &filePath : xmlFiles) {
+            QFile file(filePath);
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QString content = QString::fromUtf8(file.readAll());
+                file.close();
+
+                // استبدال اسم الحزمة القديم بالحزمة الجديدة داخل محتوى الـ XML
+                if (!oldPkg.isEmpty() && oldPkg != targetPkg && content.contains(oldPkg)) {
+                    content.replace(oldPkg, targetPkg);
+                    if (file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+                        QTextStream out(&file);
+                        out.setEncoding(QStringConverter::Utf8);
+                        out << content;
+                        file.close();
+                        updatedFilesCount++;
+                    }
+                }
+            }
+
+            // إعادة تسمية ملف الـ XML إذا كان يحمل اسم الحزمة القديم (مثال: com.whatsapp_preferences_light.xml)
+            QFileInfo fi(filePath);
+            QString oldFileName = fi.fileName();
+            if (!oldPkg.isEmpty() && oldPkg != targetPkg && oldFileName.contains(oldPkg)) {
+                QString newFileName = oldFileName;
+                newFileName.replace(oldPkg, targetPkg);
+                QString newFullPath = fi.absolutePath() + "/" + newFileName;
+                if (QFile::exists(newFullPath)) QFile::remove(newFullPath);
+                if (QFile::rename(filePath, newFullPath)) {
+                    appendLog("✏️ تم تعديل وتسمية الملف: " + oldFileName + " ⬅ " + newFileName, "SUCCESS");
+                }
+            }
+        }
+
+        // تحديث الحزمة المكتشفة لتصبح الحزمة الجديدة بعد التحويل
+        detectedOriginalPkg = targetPkg;
+        if (updatedFilesCount > 0) {
+            appendLog(QString("✔ تم استبدال المعرف الداخلي إلى (%1) في %2 ملف XML.").arg(targetPkg).arg(updatedFilesCount), "SUCCESS");
+        }
+    }
+
+    // --- تجهيز مجلد العمل النظيف من أي مصدر (.ab أو .tar أو مجلد) ---
+    QString prepareCleanWorkingStage(const QString &sourcePath) {
+        QFileInfo srcInfo(sourcePath);
+        if (!srcInfo.exists()) {
+            appendLog("المسار المحدد غير موجود: " + sourcePath, "ERROR");
+            return QString();
+        }
+
+        QString workStage = QDir::tempPath() + "/abdullah_xml_editor_stage";
+        if (QFileInfo(sourcePath).absoluteFilePath() != QFileInfo(workStage).absoluteFilePath()) {
+            QDir(workStage).removeRecursively();
+            QDir().mkpath(workStage);
+
+            if (srcInfo.isFile() && sourcePath.endsWith(".ab", Qt::CaseInsensitive)) {
+                QString tmpTar = QDir::tempPath() + "/abdullah_tmp_stage.tar";
+                if (!convertAbFileToTar(sourcePath, tmpTar)) return QString();
+                extractTarLocally(tmpTar, workStage);
+            } else if (srcInfo.isFile() && sourcePath.endsWith(".tar", Qt::CaseInsensitive)) {
+                extractTarLocally(sourcePath, workStage);
+            } else if (srcInfo.isDir()) {
+                copyDirectoryRecursively(sourcePath, workStage);
+            }
+        }
+
+        if (detectedOriginalPkg.isEmpty()) {
+            detectedOriginalPkg = detectOriginalPackageFromStageOrTar(workStage, sourcePath);
+        }
+
+        normalizeAndCleanStageDirectory(workStage);
+        return workStage;
+    }
+
+    // --- إعادة بناء ملف .tar نظيف بالمجلدات المرتبة (files, databases, shared_prefs) بدون أفرع ---
+    void rebuildCleanTarFromStage(const QString &stageDir, const QString &outTarPath) {
+        QByteArray tarStream;
+        QDirIterator it(stageDir, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            QString fullPath = it.next();
+            QString relPath = QDir(stageDir).relativeFilePath(fullPath).replace('\\', '/');
+            QFile f(fullPath);
+            if (f.open(QIODevice::ReadOnly)) {
+                QByteArray content = f.readAll();
+                f.close();
+                tarStream.append(createUstarHeader(relPath, content.size()));
+                tarStream.append(content);
+                int rem = content.size() % 512;
+                if (rem != 0) tarStream.append(QByteArray(512 - rem, '\0'));
+            }
+        }
+        tarStream.append(QByteArray(1024, '\0'));
+        QFile outFile(outTarPath);
+        if (outFile.open(QIODevice::WriteOnly)) {
+            outFile.write(tarStream);
+            outFile.close();
+        }
+    }
+
+    // --- حساب CRC32 القياسي لبناء ملفات ZIP ---
+    quint32 calculateCrc32(const QByteArray &data) {
+        quint32 crc = 0xFFFFFFFF;
+        for (uchar b : data) {
+            crc ^= b;
+            for (int i = 0; i < 8; ++i) {
+                crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+            }
+        }
+        return ~crc;
+    }
+
+    // --- بناء ملف (.zip) قياسي نقي بـ C++ يضع المجلدات (databases, shared_prefs, files) في الواجهة المباشرة بدون أفرع ---
+    bool createDirectZipArchive(const QString &stageDir, const QString &zipFilePath) {
+        QFile zipFile(zipFilePath);
+        if (!zipFile.open(QIODevice::WriteOnly)) {
+            appendLog("تعذر إنشاء ملف الـ ZIP في المسار: " + zipFilePath, "ERROR");
+            return false;
+        }
+
+        struct ZipCentralEntry {
+            QByteArray fileName;
+            quint16 method;
+            quint32 crc;
+            quint32 compSize;
+            quint32 uncompSize;
+            quint32 localHeaderOffset;
+        };
+
+        QList<ZipCentralEntry> centralDir;
+        QDirIterator it(stageDir, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+
+        while (it.hasNext()) {
+            QString fullPath = it.next();
+            // المسار نسبي مباشرة من الجذر (مثلاً: shared_prefs/com.whatsapp_preferences_light.xml) بدون apps/<pkg>
+            QString relPath = QDir(stageDir).relativeFilePath(fullPath).replace('\\', '/');
+            QByteArray nameBytes = relPath.toUtf8();
+
+            QFile inFile(fullPath);
+            if (!inFile.open(QIODevice::ReadOnly)) continue;
+            QByteArray rawData = inFile.readAll();
+            inFile.close();
+
+            quint32 crc = calculateCrc32(rawData);
+            quint32 uncompSize = rawData.size();
+            quint16 method = 0;
+            QByteArray payloadToWrite;
+
+            if (!rawData.isEmpty()) {
+                // qCompress ينتج: [4 بايت حجم][2 بايت Zlib][بيانات DEFLATE الخام][4 بايت Adler32]
+                QByteArray qtComp = qCompress(rawData, 9);
+                if (qtComp.size() > 10) {
+                    payloadToWrite = qtComp.mid(6, qtComp.size() - 10);
+                    method = 8; // DEFLATE
+                } else {
+                    payloadToWrite = rawData;
+                    method = 0; // STORE
+                }
+            }
+
+            quint32 compSize = payloadToWrite.size();
+            quint32 localOffset = zipFile.pos();
+
+            // كتابة Local File Header (PK\x03\x04)
+            QByteArray lfh(30, '\0');
+            quint32 sig = 0x04034b50;
+            quint16 ver = 20;
+            quint16 flags = 0x0800; // UTF-8 filename flag
+            quint16 nameLen = nameBytes.size();
+            memcpy(lfh.data() + 0, &sig, 4);
+            memcpy(lfh.data() + 4, &ver, 2);
+            memcpy(lfh.data() + 6, &flags, 2);
+            memcpy(lfh.data() + 8, &method, 2);
+            memcpy(lfh.data() + 14, &crc, 4);
+            memcpy(lfh.data() + 18, &compSize, 4);
+            memcpy(lfh.data() + 22, &uncompSize, 4);
+            memcpy(lfh.data() + 26, &nameLen, 2);
+
+            zipFile.write(lfh);
+            zipFile.write(nameBytes);
+            zipFile.write(payloadToWrite);
+
+            centralDir.append({nameBytes, method, crc, compSize, uncompSize, localOffset});
+        }
+
+        quint32 centralDirOffset = zipFile.pos();
+        for (const auto &entry : centralDir) {
+            QByteArray cdh(46, '\0');
+            quint32 sig = 0x02014b50;
+            quint16 verMade = 20;
+            quint16 verNeed = 20;
+            quint16 flags = 0x0800;
+            quint16 nameLen = entry.fileName.size();
+
+            memcpy(cdh.data() + 0, &sig, 4);
+            memcpy(cdh.data() + 4, &verMade, 2);
+            memcpy(cdh.data() + 6, &verNeed, 2);
+            memcpy(cdh.data() + 8, &flags, 2);
+            memcpy(cdh.data() + 10, &entry.method, 2);
+            memcpy(cdh.data() + 16, &entry.crc, 4);
+            memcpy(cdh.data() + 20, &entry.compSize, 4);
+            memcpy(cdh.data() + 24, &entry.uncompSize, 4);
+            memcpy(cdh.data() + 28, &nameLen, 2);
+            memcpy(cdh.data() + 42, &entry.localHeaderOffset, 4);
+
+            zipFile.write(cdh);
+            zipFile.write(entry.fileName);
+        }
+
+        quint32 centralDirSize = zipFile.pos() - centralDirOffset;
+
+        // كتابة End of Central Directory (PK\x05\x06)
+        QByteArray eocd(22, '\0');
+        quint32 eocdSig = 0x06054b50;
+        quint16 count = centralDir.size();
+        memcpy(eocd.data() + 0, &eocdSig, 4);
+        memcpy(eocd.data() + 8, &count, 2);
+        memcpy(eocd.data() + 10, &count, 2);
+        memcpy(eocd.data() + 12, &centralDirSize, 4);
+        memcpy(eocd.data() + 16, &centralDirOffset, 4);
+
+        zipFile.write(eocd);
+        zipFile.close();
+        return true;
+    }
+
+    // --- الدالة الرئيسية لتجهيز الحزمة المختارة وضغطها بصيغة ZIP مباشر على الكمبيوتر ---
+    void exportCleanedPackageToZip(const QString &sourcePath, const QString &targetPkg) {
+        if (sourcePath.isEmpty() || targetPkg.isEmpty()) {
+            QMessageBox::warning(this, "تنبيه", "يرجى تحديد ملف/مجلد البيانات واختيار اسم الحزمة من القائمة المنسدلة أولاً!");
+            return;
+        }
+
+        appendLog("1/3 جاري تجهيز وترتيب المجلدات (files, databases, shared_prefs) وحذف الزوائد...", "INFO");
+        QString cleanStage = prepareCleanWorkingStage(sourcePath);
+        if (cleanStage.isEmpty()) return;
+
+        appendLog("2/3 جاري تعديل محتوى وأسماء ملفات الـ XML لتطابق الحزمة: " + targetPkg, "INFO");
+        adaptXmlFilesForTargetPackage(cleanStage, detectedOriginalPkg, targetPkg);
+
+        QString defaultZipPath = QDir::homePath() + "/Desktop/" + targetPkg + ".zip";
+        QString saveZipPath = QFileDialog::getSaveFileName(this, "حفظ ملف الـ ZIP الجاهز للنقل اليدوي", defaultZipPath, "ZIP Archive (*.zip)");
+        if (saveZipPath.isEmpty()) return;
+
+        appendLog("3/3 جاري ضغط المجلدات مباشرة بصيغة ZIP (بدون أفرع apps)...", "INFO");
+        if (createDirectZipArchive(cleanStage, saveZipPath)) {
+            appendLog("✔ تم إنشاء وحفظ ملف الـ ZIP بنجاح في: " + saveZipPath, "SUCCESS");
+            QMessageBox::information(this, "تم إنشاء ملف ZIP بنجاح",
+                "تم تجهيز وضغط المجلدات مباشرة للحزمة:\n" + targetPkg + "\n\nالمسار:\n" + saveZipPath);
+        }
+    }
+ }
+ 
 // --- الصفحة 5: المركز اللاسلكي المتكامل (الإقران بالكود + تصحيح الاتصال + عرض الشاشة + العمليات) ---
     QWidget* createWirelessControlPage() {
         QFrame *page = new QFrame(this);
