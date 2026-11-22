@@ -45,6 +45,9 @@
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QScrollArea>
 
 // ============================================================================
 // نافذة فرعية متقدمة لإدارة، إعادة تسمية، وتعديل محتوى ملفات الـ XML قبل الحقن
