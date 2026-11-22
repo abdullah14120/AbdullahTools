@@ -769,6 +769,9 @@ public:
         pagesStack->addWidget(createWirelessControlPage()); // 5: الربط اللاسلكي والتحكم بالشاشة
         pagesStack->addWidget(createLocalBridgePage());         // 6: الاتصال عبر التطبيق الوسيط (Local Wi-Fi Bridge)
 
+        pagesStack->addWidget(createLocalBridgePage());         // 6: التطبيق الوسيط (Wi-Fi Bridge)
+        pagesStack->addWidget(createWhatsAppHubPage());         // 7: مدير ونقل الواتساب الشامل
+
         workAreaLayout->addWidget(pagesStack, 3);
         workAreaLayout->addWidget(createConsolePanel(), 2);
 
@@ -849,6 +852,21 @@ private:
     QLineEdit *bridgePullRemoteInput;
     QLineEdit *bridgeShellInput;
     QLineEdit *bridgeActionInput;
+    
+  // عناصر الصفحة 7: مدير ونقل الواتساب الشامل
+    QComboBox *waSourcePkgCombo;
+    QComboBox *waTargetPkgCombo;
+    QLineEdit *waTransferDirInput;
+    QCheckBox *waIncludeMediaChk;
+    QCheckBox *waCleanCacheChk;
+
+    QLineEdit *wabArchiveDirInput;
+    QLineEdit *wabKeyInput;
+    QLineEdit *wabExtraArgsInput;
+    QCheckBox *wabFromAdbChk;
+    QCheckBox *wabPullMediaChk;
+    QLabel *waHubStatusLabel;
+    QProcess *wabViewerProcess = nullptr;  
     
     // --- الشريط العلوي ---
     QWidget* createTopBar() {
@@ -931,7 +949,8 @@ private:
             {"📁  نقل وسحب الملفات", 3},
             {"💻  أوامر Shell المتقدمة", 4},
             {"📡  الربط اللاسلكي والشاشة", 5},
-            {"🌐  التطبيق الوسيط (Wi-Fi Bridge)", 6}
+            {"🌐  التطبيق الوسيط (Wi-Fi Bridge)", 6},
+            {"💬  مدير ونقل الواتساب الشامل", 7}
         };
 
         for (const auto &item : items) {
@@ -2969,6 +2988,562 @@ private:
 
         return panel;
     }
+    
+  // ============================================================================
+    // الصفحة 7: مدير ونقل الواتساب الشامل (نقل أندرويد + جلسة كاملة + أرشفة وعارض)
+    // ============================================================================
+
+    // تحديد اسم مجلد الواتساب القياسي حسب نوع الحزمة
+    QString getWhatsAppFolderNameForPkg(const QString &pkg) {
+        if (pkg.contains("w4b", Qt::CaseInsensitive)) return "WhatsApp Business";
+        return "WhatsApp";
+    }
+
+    // اكتشاف إصدار SDK الهاتف المتصل حالياً لتحديد مسار تخزين واتساب الصحيح تلقائياً
+    int detectConnectedAndroidSdkSync() {
+        QProcess p;
+        p.start(getAdbExecutablePath(), {"shell", "getprop", "ro.build.version.sdk"});
+        p.waitForFinished(3000);
+        return QString::fromUtf8(p.readAllStandardOutput()).trimmed().toInt();
+    }
+
+    // اكتشاف المسار الفعلي لمجلد الواتساب الخارجي على الهاتف (يدعم Android 11+ و Android 10 والأقدم)
+    QString detectWhatsAppMediaPathOnDevice(const QString &pkg, bool forWritingTarget = false) {
+        int sdk = detectConnectedAndroidSdkSync();
+        QString folderName = getWhatsAppFolderNameForPkg(pkg);
+        QString modernPath = QString("/sdcard/Android/media/%1/%2").arg(pkg, folderName);
+        QString legacyPath = QString("/sdcard/%1").arg(folderName);
+
+        if (forWritingTarget) {
+            return (sdk >= 30) ? modernPath : legacyPath;
+        }
+
+        // عند القراءة من الهاتف القديم: نتحقق أيهما يحتوي فعلياً على مجلد Databases أو Media
+        QProcess checkProc;
+        QString checkCmd = QString("if [ -d '%1/Databases' ] || [ -d '%1/Media' ]; then echo '%1'; "
+                                   "elif [ -d '%2/Databases' ] || [ -d '%2/Media' ]; then echo '%2'; "
+                                   "else echo '%3'; fi")
+                               .arg(modernPath, legacyPath, (sdk >= 30 ? modernPath : legacyPath));
+        checkProc.start(getAdbExecutablePath(), {"shell", checkCmd});
+        checkProc.waitForFinished(4000);
+        QString detected = QString::fromUtf8(checkProc.readAllStandardOutput()).trimmed();
+        return detected.isEmpty() ? ((sdk >= 30) ? modernPath : legacyPath) : detected;
+    }
+
+    // العثور على محرك whatsapp_backup_tools (تنفيذي مدمج في dist/wab_engine أو عبر Python)
+    bool resolveWabEngineCommand(const QString &toolName, const QString &moduleName,
+                                 QString &programOut, QStringList &baseArgsOut) {
+        QString appDir = QCoreApplication::applicationDirPath();
+        QStringList bundledPaths = {
+            appDir + "/wab_engine/" + toolName + ".exe",
+            appDir + "/" + toolName + ".exe"
+        };
+
+        for (const QString &exe : bundledPaths) {
+            if (QFile::exists(exe)) {
+                programOut = exe;
+                baseArgsOut.clear();
+                return true;
+            }
+        }
+
+        // البديل: التشغيل عبر Python المثبت على النظام
+        programOut = "python";
+        baseArgsOut = {"-m", moduleName};
+        return true;
+    }
+
+    // --- واجهة الصفحة 7 ---
+    QWidget* createWhatsAppHubPage() {
+        QFrame *page = new QFrame(this);
+        page->setObjectName("Card");
+        QVBoxLayout *outerLayout = new QVBoxLayout(page);
+        outerLayout->setContentsMargins(6, 6, 6, 6);
+
+        QScrollArea *scroll = new QScrollArea(page);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setStyleSheet("QScrollArea { background: transparent; }");
+
+        QWidget *content = new QWidget(scroll);
+        content->setStyleSheet("background: transparent;");
+        QVBoxLayout *layout = new QVBoxLayout(content);
+        layout->setContentsMargins(16, 12, 16, 16);
+        layout->setSpacing(12);
+
+        QLabel *title = new QLabel("💬 مركز النسخ الاحتياطي ونقل الواتساب الشامل والأرشفة الأوفلاين", content);
+        title->setStyleSheet("font-size: 16px; font-weight: bold; color: #E3E3E3;");
+        layout->addWidget(title);
+
+        waHubStatusLabel = new QLabel("● جاهز: اختر الحزمة المصدر والهدف، ثم حدد طريقة النقل (بدون روت / جلسة كاملة / أرشفة وعرض أوفلاين).", content);
+        waHubStatusLabel->setStyleSheet("background-color: #131314; color: #6DD58C; border: 1px solid #282A2C; border-radius: 8px; padding: 9px 14px; font-size: 12px; font-weight: bold;");
+        layout->addWidget(waHubStatusLabel);
+
+        // إعدادات مشتركة للحزم ومسار النقل على الكمبيوتر
+        QStringList waPackages = {
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "com.universe.messenger",
+            "com.nasa",
+            "com.android.ab",
+            "com.android.meta"
+        };
+
+        QHBoxLayout *pkgRow = new QHBoxLayout();
+        waSourcePkgCombo = new QComboBox(content);
+        waSourcePkgCombo->setEditable(true);
+        waSourcePkgCombo->addItems(waPackages);
+
+        waTargetPkgCombo = new QComboBox(content);
+        waTargetPkgCombo->setEditable(true);
+        waTargetPkgCombo->addItems(waPackages);
+
+        waTransferDirInput = new QLineEdit(QDir::homePath() + "/Desktop/WhatsApp_Transfer", content);
+        waTransferDirInput->setPlaceholderText("مجلد حفظ ونقل النسخة على الكمبيوتر...");
+
+        QPushButton *browseTransferDirBtn = new QPushButton("📂 مجلد", content);
+        browseTransferDirBtn->setProperty("class", "SecondaryBtn");
+        connect(browseTransferDirBtn, &QPushButton::clicked, this, [=]() {
+            QString d = QFileDialog::getExistingDirectory(this, "اختر مجلد حفظ ونقل بيانات الواتساب", waTransferDirInput->text());
+            if (!d.isEmpty()) waTransferDirInput->setText(d);
+        });
+
+        pkgRow->addWidget(new QLabel("الحزمة المصدر:", content));
+        pkgRow->addWidget(waSourcePkgCombo, 1);
+        pkgRow->addWidget(new QLabel("الحزمة الهدف:", content));
+        pkgRow->addWidget(waTargetPkgCombo, 1);
+        pkgRow->addWidget(new QLabel("مجلد النقل:", content));
+        pkgRow->addWidget(waTransferDirInput, 2);
+        pkgRow->addWidget(browseTransferDirBtn);
+        layout->addLayout(pkgRow);
+
+        // =========================================================================
+        // الميزة 1: النسخ الاحتياطي ونقل الواتساب بين جهازي أندرويد (بدون روت)
+        // =========================================================================
+        QLabel *sec1 = new QLabel("1️⃣ نقل الواتساب الكامل إلى جهاز أندرويد آخر (بدون روت - كشف تلقائي لمسار Android 11+ و 10-):", content);
+        sec1->setStyleSheet("color: #6DD58C; font-size: 13px; font-weight: bold; margin-top: 4px;");
+        layout->addWidget(sec1);
+
+        QHBoxLayout *sec1Opts = new QHBoxLayout();
+        waIncludeMediaChk = new QCheckBox("تضمين مجلد الوسائط بالكامل (الصور، الفيديو، الصوتيات، المستندات)", content);
+        waIncludeMediaChk->setChecked(true);
+
+        waCleanCacheChk = new QCheckBox("تنظيف ملفات .Trash والكاش التالف تلقائياً قبل الرفع", content);
+        waCleanCacheChk->setChecked(true);
+
+        sec1Opts->addWidget(waIncludeMediaChk);
+        sec1Opts->addWidget(waCleanCacheChk);
+        sec1Opts->addStretch();
+        layout->addLayout(sec1Opts);
+
+        QHBoxLayout *sec1Btns = new QHBoxLayout();
+        QPushButton *pullWaNoRootBtn = new QPushButton("📥 الخطوة 1: سحب واتساب من الهاتف القديم للكمبيوتر", content);
+        pullWaNoRootBtn->setProperty("class", "ActionBtn");
+        connect(pullWaNoRootBtn, &QPushButton::clicked, this, &MainWindow::pullWhatsAppExternalBackup);
+
+        QPushButton *pushWaNoRootBtn = new QPushButton("📤 الخطوة 2: رفع واستعادة واتساب للهاتف الجديد", content);
+        pushWaNoRootBtn->setProperty("class", "ActionBtn");
+        connect(pushWaNoRootBtn, &QPushButton::clicked, this, &MainWindow::pushWhatsAppExternalRestore);
+
+        QPushButton *detectWaPathBtn = new QPushButton("🔎 فحص مسار واتساب على الهاتف المتصل", content);
+        detectWaPathBtn->setProperty("class", "SecondaryBtn");
+        connect(detectWaPathBtn, &QPushButton::clicked, this, [=]() {
+            QString pkg = waSourcePkgCombo->currentText().trimmed();
+            int sdk = detectConnectedAndroidSdkSync();
+            QString found = detectWhatsAppMediaPathOnDevice(pkg, false);
+            QString msg = QString("✔ SDK الهاتف: %1 | المسار المكتشف للحزمة (%2): %3").arg(sdk).arg(pkg, found);
+            waHubStatusLabel->setText(msg);
+            appendLog(msg, "SUCCESS");
+        });
+
+        sec1Btns->addWidget(pullWaNoRootBtn);
+        sec1Btns->addWidget(pushWaNoRootBtn);
+        sec1Btns->addWidget(detectWaPathBtn);
+        sec1Btns->addStretch();
+        layout->addLayout(sec1Btns);
+
+        // =========================================================================
+        // الميزة 2: النقل الفوري الكامل بالجلسة (data/data + Media بضغطة زر)
+        // =========================================================================
+        QLabel *sec2 = new QLabel("2️⃣ النقل الفوري الكامل بالجلسة (دمج بيانات data/data + تعديل XML + مجلد Media في خطوة واحدة):", content);
+        sec2->setStyleSheet("color: #A8C7FA; font-size: 13px; font-weight: bold; margin-top: 8px;");
+        layout->addWidget(sec2);
+
+        QHBoxLayout *sec2Btns = new QHBoxLayout();
+        QPushButton *pullFullSessionBtn = new QPushButton("🧬 سحب الجلسة الكاملة (data/data + Media) من الهاتف القديم", content);
+        pullFullSessionBtn->setProperty("class", "SecondaryBtn");
+        connect(pullFullSessionBtn, &QPushButton::clicked, this, &MainWindow::pullWhatsAppFullSession);
+
+        QPushButton *injectFullSessionBtn = new QPushButton("🚀 حقن الجلسة الكاملة + تعديل XML + رفع Media للهاتف الهدف", content);
+        injectFullSessionBtn->setProperty("class", "ActionBtn");
+        connect(injectFullSessionBtn, &QPushButton::clicked, this, &MainWindow::restoreWhatsAppFullSession);
+
+        sec2Btns->addWidget(pullFullSessionBtn);
+        sec2Btns->addWidget(injectFullSessionBtn);
+        sec2Btns->addStretch();
+        layout->addLayout(sec2Btns);
+
+        // =========================================================================
+        // الميزة 3: الأرشفة وفك التشفير وتصفح المحادثات أوفلاين (whatsapp_backup_tools)
+        // =========================================================================
+        QLabel *sec3 = new QLabel("3️⃣ الأرشفة الدائمة وفك تشفير Crypt15 وعارض المحادثات الأوفلاين (whatsapp_backup_tools Engine):", content);
+        sec3->setStyleSheet("color: #FCD34D; font-size: 13px; font-weight: bold; margin-top: 8px;");
+        layout->addWidget(sec3);
+
+        QHBoxLayout *wabRow1 = new QHBoxLayout();
+        wabArchiveDirInput = new QLineEdit(QDir::homePath() + "/Desktop/WhatsApp_Archive", content);
+        wabArchiveDirInput->setPlaceholderText("مجلد حفظ الأرشيف المنظم...");
+
+        QPushButton *browseArchiveBtn = new QPushButton("📂 الأرشيف", content);
+        browseArchiveBtn->setProperty("class", "SecondaryBtn");
+        connect(browseArchiveBtn, &QPushButton::clicked, this, [=]() {
+            QString d = QFileDialog::getExistingDirectory(this, "اختر مجلد الأرشيف", wabArchiveDirInput->text());
+            if (!d.isEmpty()) wabArchiveDirInput->setText(d);
+        });
+
+        wabKeyInput = new QLineEdit(content);
+        wabKeyInput->setPlaceholderText("مفتاح التشفير (64 خانة Hex) أو مسار ملف key (اختياري)...");
+
+        wabRow1->addWidget(new QLabel("مجلد الأرشيف:", content));
+        wabRow1->addWidget(wabArchiveDirInput, 2);
+        wabRow1->addWidget(browseArchiveBtn);
+        wabRow1->addWidget(new QLabel("مفتاح Crypt15:", content));
+        wabRow1->addWidget(wabKeyInput, 2);
+        layout->addLayout(wabRow1);
+
+        QHBoxLayout *wabRow2 = new QHBoxLayout();
+        wabFromAdbChk = new QCheckBox("السحب المباشر من الهاتف عبر ADB (--from-adb)", content);
+        wabFromAdbChk->setChecked(true);
+
+        wabPullMediaChk = new QCheckBox("سحب الوسائط للأرشيف (--pull-media)", content);
+        wabPullMediaChk->setChecked(true);
+
+        wabExtraArgsInput = new QLineEdit(content);
+        wabExtraArgsInput->setPlaceholderText("وسائط إضافية اختيارية (مثال: --link-duplicates)...");
+
+        wabRow2->addWidget(wabFromAdbChk);
+        wabRow2->addWidget(wabPullMediaChk);
+        wabRow2->addWidget(wabExtraArgsInput, 1);
+        layout->addLayout(wabRow2);
+
+        QHBoxLayout *wabBtns = new QHBoxLayout();
+        QPushButton *runArchiverBtn = new QPushButton("🗃️ بدء الأرشفة وفك التشفير (wab-archiver)", content);
+        runArchiverBtn->setProperty("class", "ActionBtn");
+        connect(runArchiverBtn, &QPushButton::clicked, this, &MainWindow::runWabArchiverEngine);
+
+        QPushButton *openViewerBtn = new QPushButton("🌐 فتح عارض المحادثات الأوفلاين (wab-viewer)", content);
+        openViewerBtn->setProperty("class", "ActionBtn");
+        connect(openViewerBtn, &QPushButton::clicked, this, &MainWindow::launchWabOfflineViewer);
+
+        QPushButton *stopViewerBtn = new QPushButton("⏹ إيقاف العارض", content);
+        stopViewerBtn->setProperty("class", "DangerBtn");
+        connect(stopViewerBtn, &QPushButton::clicked, this, &MainWindow::stopWabOfflineViewer);
+
+        QPushButton *checkWabHelpBtn = new QPushButton("❓ فحص جاهزية المحرك", content);
+        checkWabHelpBtn->setProperty("class", "SecondaryBtn");
+        connect(checkWabHelpBtn, &QPushButton::clicked, this, [=]() {
+            QString prog; QStringList args;
+            resolveWabEngineCommand("wab-archiver", "wab_archiver", prog, args);
+            args << "--help";
+            appendLog("فحص محرك الأرشفة: " + prog + " " + args.join(" "), "INFO");
+            QProcess *p = new QProcess(this);
+            connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int code, QProcess::ExitStatus) {
+                QString out = QString::fromUtf8(p->readAllStandardOutput() + p->readAllStandardError()).trimmed();
+                if (code == 0) {
+                    appendLog("✔ محرك whatsapp_backup_tools جاهز للعمل!", "SUCCESS");
+                    waHubStatusLabel->setText("✔ محرك whatsapp_backup_tools متوفر وجاهز للأرشفة وعرض المحادثات.");
+                } else {
+                    appendLog("⚠ لم يتم العثور على المحرك. تأكد من وجود dist/wab_engine أو تثبيت الحزمة: pip install whatsapp_backup_tools-0.70-py3-none-any.whl", "WARN");
+                }
+                if (!out.isEmpty()) appendLog(out.left(1200), "OUTPUT");
+                p->deleteLater();
+            });
+            p->start(prog, args);
+        });
+
+        wabBtns->addWidget(runArchiverBtn);
+        wabBtns->addWidget(openViewerBtn);
+        wabBtns->addWidget(stopViewerBtn);
+        wabBtns->addWidget(checkWabHelpBtn);
+        wabBtns->addStretch();
+        layout->addLayout(wabBtns);
+
+        layout->addStretch();
+        scroll->setWidget(content);
+        outerLayout->addWidget(scroll);
+        return page;
+    }
+
+    // --- 1. سحب مجلدات الواتساب الخارجية من الهاتف القديم (بدون روت) ---
+    void pullWhatsAppExternalBackup() {
+        QString srcPkg = waSourcePkgCombo->currentText().trimmed();
+        QString localRoot = waTransferDirInput->text().trimmed();
+        if (srcPkg.isEmpty() || localRoot.isEmpty()) {
+            QMessageBox::warning(this, "تنبيه", "يرجى تحديد الحزمة المصدر ومجلد الحفظ أولاً!");
+            return;
+        }
+
+        QString remoteWaRoot = detectWhatsAppMediaPathOnDevice(srcPkg, false);
+        QString extDir = localRoot + "/external";
+        QDir().mkpath(extDir);
+
+        waHubStatusLabel->setText("⏳ جاري سحب قواعد البيانات والنسخ من: " + remoteWaRoot);
+        appendLog("بدء سحب الواتساب (بدون روت) من المسار: " + remoteWaRoot, "INFO");
+
+        QList<AdbStep> steps;
+        steps.append({{"pull", remoteWaRoot + "/Databases", extDir + "/Databases"},
+                      "سحب قواعد بيانات المحادثات (Databases)...", "✔ تم سحب Databases."});
+        steps.append({{"pull", remoteWaRoot + "/Backups", extDir + "/Backups"},
+                      "سحب ملفات النسخ الاحتياطي والإعدادات (Backups)...", "✔ تم سحب Backups."});
+
+        if (waIncludeMediaChk->isChecked()) {
+            steps.append({{"pull", remoteWaRoot + "/Media", extDir + "/Media"},
+                          "سحب مجلد الوسائط بالكامل (Media) - قد يستغرق بعض الوقت حسب الحجم...", "✔ اكتمل سحب جميع الوسائط (Media)!"});
+        }
+
+        runAdbSequence(steps);
+        waHubStatusLabel->setText("✔ تم جدولة سحب الواتساب إلى: " + extDir + " (تابع التقدم في السجل بالأسفل).");
+    }
+
+    // --- 2. رفع واستعادة مجلدات الواتساب للهاتف الجديد (بدون روت) ---
+    void pushWhatsAppExternalRestore() {
+        QString dstPkg = waTargetPkgCombo->currentText().trimmed();
+        QString localRoot = waTransferDirInput->text().trimmed();
+        QString extDir = localRoot + "/external";
+
+        if (!QDir(extDir).exists()) {
+            // في حال اختار المستخدم مجلد WhatsApp مباشرة بدون مجلد فرعي external
+            extDir = localRoot;
+        }
+        if (!QDir(extDir + "/Databases").exists() && !QDir(extDir + "/Media").exists()) {
+            QMessageBox::warning(this, "تنبيه", "لم يتم العثور على مجلد Databases أو Media داخل:\n" + extDir);
+            return;
+        }
+
+        QString targetWaRoot = detectWhatsAppMediaPathOnDevice(dstPkg, true);
+        waHubStatusLabel->setText("⏳ جاري رفع الواتساب للهاتف الجديد في المسار: " + targetWaRoot);
+        appendLog("بدء رفع الواتساب للهاتف الهدف (" + dstPkg + ") إلى: " + targetWaRoot, "INFO");
+
+        QList<AdbStep> steps;
+        steps.append({{"shell", "am force-stop " + dstPkg}, "إغلاق التطبيق الهدف قبل النقل...", ""});
+        steps.append({{"shell", "mkdir -p '" + targetWaRoot + "'"}, "تجهيز مجلد الوجهة على الهاتف الجديد...", ""});
+
+        if (waCleanCacheChk->isChecked()) {
+            steps.append({{"shell", "rm -rf '" + targetWaRoot + "/.Trash' '" + targetWaRoot + "/.Shared' '" + targetWaRoot + "/Databases/*.tmp'"},
+                          "تنظيف الملفات المؤقتة والتالفة في المسار الهدف...", ""});
+        }
+
+        if (QDir(extDir + "/Databases").exists()) {
+            steps.append({{"push", extDir + "/Databases", targetWaRoot + "/"},
+                          "رفع قواعد بيانات المحادثات (Databases)...", "✔ تم رفع Databases بنجاح."});
+        }
+        if (QDir(extDir + "/Backups").exists()) {
+            steps.append({{"push", extDir + "/Backups", targetWaRoot + "/"},
+                          "رفع ملفات Backups...", "✔ تم رفع Backups بنجاح."});
+        }
+        if (waIncludeMediaChk->isChecked() && QDir(extDir + "/Media").exists()) {
+            steps.append({{"push", extDir + "/Media", targetWaRoot + "/"},
+                          "رفع مجلد الوسائط (Media) إلى الهاتف الجديد...", "✔ اكتمل نقل الواتساب بالكامل! افتح الواتساب الآن واضغط (استعادة)."});
+        }
+
+        runAdbSequence(steps);
+    }
+
+    // --- 3. سحب الجلسة الكاملة (data/data + Media) من الهاتف القديم ---
+    void pullWhatsAppFullSession() {
+        QString srcPkg = waSourcePkgCombo->currentText().trimmed();
+        QString localRoot = waTransferDirInput->text().trimmed();
+        if (srcPkg.isEmpty() || localRoot.isEmpty()) return;
+
+        QDir().mkpath(localRoot);
+        QString sessionTarLocal = localRoot + "/session_data.tar";
+        QString sessionAbLocal = localRoot + "/session_data.ab";
+        QString remoteWaRoot = detectWhatsAppMediaPathOnDevice(srcPkg, false);
+
+        // فحص توفر الروت على الهاتف القديم
+        QProcess rootCheck;
+        rootCheck.start(getAdbExecutablePath(), {"shell", "su -c id"});
+        rootCheck.waitForFinished(3000);
+        bool hasRoot = QString::fromUtf8(rootCheck.readAllStandardOutput()).contains("uid=0");
+
+        QList<AdbStep> steps;
+        if (hasRoot) {
+            appendLog("✔ تم رصد صلاحية Root: جاري سحب مجلد /data/data/" + srcPkg + " بالكامل...", "SUCCESS");
+            steps.append({{"shell", "su -c \"am force-stop " + srcPkg + " && tar -cf /data/local/tmp/wa_session.tar -C /data/data/" + srcPkg + " databases shared_prefs files 2>/dev/null && chmod 666 /data/local/tmp/wa_session.tar\""},
+                          "ضغط بيانات الجلسة (databases, shared_prefs, files) داخل الهاتف...", ""});
+            steps.append({{"pull", "/data/local/tmp/wa_session.tar", sessionTarLocal},
+                          "سحب ملف الجلسة (session_data.tar) إلى الكمبيوتر...", "✔ تم سحب بيانات الجلسة بنجاح."});
+            steps.append({{"shell", "rm -f /data/local/tmp/wa_session.tar"}, "", ""});
+        } else {
+            appendLog("لا يتوفر Root: سيتم سحب الجلسة عبر adb backup الرسمي (وافق من شاشة الهاتف)...", "WARN");
+            steps.append({{"backup", "-f", sessionAbLocal, "-noapk", srcPkg},
+                          "سحب نسخة الجلسة (.ab) - يرجى تأكيد النسخ الاحتياطي على شاشة الهاتف...", "✔ تم سحب session_data.ab بنجاح."});
+        }
+
+        if (waIncludeMediaChk->isChecked()) {
+            QDir().mkpath(localRoot + "/external");
+            steps.append({{"pull", remoteWaRoot + "/Media", localRoot + "/external/Media"},
+                          "سحب مجلد الوسائط الخارجي (Media)...", "✔ اكتمل سحب الجلسة الكاملة مع الوسائط!"});
+        }
+
+        runAdbSequence(steps);
+        waHubStatusLabel->setText("✔ جاري سحب الجلسة الكاملة إلى: " + localRoot);
+    }
+
+    // --- 4. حقن الجلسة الكاملة (ترتيب + تعديل XML للحزمة الهدف + حقن data/data + رفع Media) ---
+    void restoreWhatsAppFullSession() {
+        QString srcPkg = waSourcePkgCombo->currentText().trimmed();
+        QString dstPkg = waTargetPkgCombo->currentText().trimmed();
+        QString localRoot = waTransferDirInput->text().trimmed();
+
+        QString dataSource;
+        if (QFile::exists(localRoot + "/session_data.tar")) dataSource = localRoot + "/session_data.tar";
+        else if (QFile::exists(localRoot + "/session_data.ab")) dataSource = localRoot + "/session_data.ab";
+        else {
+            QMessageBox::warning(this, "ملف الجلسة غير موجود",
+                "لم يتم العثور على session_data.tar أو session_data.ab داخل:\n" + localRoot + "\nقم بتنفيذ خطوة (سحب الجلسة الكاملة) أولاً.");
+            return;
+        }
+
+        appendLog("1/3 تجهيز وترتيب ملفات الجلسة وتنظيف (r / decompressed)...", "INFO");
+        detectedOriginalPkg = srcPkg;
+        QString cleanStage = prepareCleanWorkingStage(dataSource);
+        if (cleanStage.isEmpty()) return;
+
+        appendLog("2/3 تعديل محتوى وأسماء ملفات XML لتطابق الحزمة الهدف: " + dstPkg, "INFO");
+        adaptXmlFilesForTargetPackage(cleanStage, srcPkg, dstPkg);
+
+        appendLog("3/3 حقن بيانات الجلسة في /data/data/" + dstPkg + " ...", "INFO");
+        restoreDataToPackage(cleanStage, dstPkg);
+
+        // رفع مجلد الوسائط الخارجي إذا كان متوفراً ومحدداً
+        if (waIncludeMediaChk->isChecked() && QDir(localRoot + "/external/Media").exists()) {
+            QString targetWaRoot = detectWhatsAppMediaPathOnDevice(dstPkg, true);
+            runAdbSequence({
+                {{"shell", "mkdir -p '" + targetWaRoot + "'"}, "تجهيز مسار الوسائط على الهاتف الهدف...", ""},
+                {{"push", localRoot + "/external/Media", targetWaRoot + "/"},
+                 "رفع مجلد الوسائط (Media) لإكمال الجلسة...", "✔ اكتمل حقن الجلسة الكاملة ونقل الوسائط بنجاح!"}
+            });
+        }
+        waHubStatusLabel->setText("✔ تم إطلاق عملية الحقن الكامل للحزمة: " + dstPkg);
+    }
+
+    // --- 5. تشغيل محرك الأرشفة وفك تشفير Crypt15 (wab-archiver) ---
+    void runWabArchiverEngine() {
+        QString archiveDir = wabArchiveDirInput->text().trimmed();
+        if (archiveDir.isEmpty()) {
+            QMessageBox::warning(this, "تنبيه", "حدد مجلد الأرشيف أولاً!");
+            return;
+        }
+        QDir().mkpath(archiveDir);
+
+        QString prog;
+        QStringList args;
+        resolveWabEngineCommand("wab-archiver", "wab_archiver", prog, args);
+
+        if (wabFromAdbChk->isChecked()) {
+            args << "--from-adb";
+            if (wabPullMediaChk->isChecked()) args << "--pull-media";
+        } else {
+            QString localSrc = waTransferDirInput->text().trimmed();
+            if (!localSrc.isEmpty()) args << "--source" << localSrc;
+        }
+
+        args << "--archive" << archiveDir;
+
+        QString key = wabKeyInput->text().trimmed();
+        if (!key.isEmpty()) {
+            args << "--key" << key;
+        }
+
+        QString extra = wabExtraArgsInput->text().trimmed();
+        if (!extra.isEmpty()) {
+            args.append(QProcess::splitCommand(extra));
+        }
+
+        appendLog("تشغيل محرك الأرشفة: " + prog + " " + args.join(" "), "INFO");
+        waHubStatusLabel->setText("⏳ جاري تشغيل wab-archiver لفك التشفير وبناء الأرشيف...");
+        operationProgress->setRange(0, 0);
+
+        QProcess *proc = new QProcess(this);
+        // إضافة مجلد platform-tools لمتغير PATH ليتمكن المحرك من إيجاد adb.exe المدمج تلقائياً
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        QString adbDir = QFileInfo(getAdbExecutablePath()).absolutePath();
+        env.insert("PATH", adbDir + ";" + env.value("PATH"));
+        proc->setProcessEnvironment(env);
+
+        connect(proc, &QProcess::readyReadStandardOutput, this, [=]() {
+            QString out = QString::fromUtf8(proc->readAllStandardOutput()).trimmed();
+            for (const QString &l : out.split('\n', Qt::SkipEmptyParts)) appendLog(l, "OUTPUT");
+        });
+        connect(proc, &QProcess::readyReadStandardError, this, [=]() {
+            QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
+            for (const QString &l : err.split('\n', Qt::SkipEmptyParts)) appendLog(l, "WARN");
+        });
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [=](int code, QProcess::ExitStatus) {
+            operationProgress->setRange(0, 100);
+            operationProgress->setValue(100);
+            if (code == 0) {
+                waHubStatusLabel->setText("✔ اكتملت الأرشفة بنجاح! يمكنك الآن الضغط على (فتح عارض المحادثات الأوفلاين).");
+                appendLog("✔ انتهى محرك الأرشفة بنجاح.", "SUCCESS");
+            } else {
+                waHubStatusLabel->setText("⚠ توقف محرك الأرشفة برمز (" + QString::number(code) + ") - راجع السجل للتفاصيل.");
+                appendLog("انتهى wab-archiver برمز خروج: " + QString::number(code), "ERROR");
+            }
+            proc->deleteLater();
+        });
+
+        proc->start(prog, args);
+    }
+
+    // --- 6. تشغيل عارض المحادثات الأوفلاين (wab-viewer) وفتح المتصفح تلقائياً ---
+    void launchWabOfflineViewer() {
+        QString archiveDir = wabArchiveDirInput->text().trimmed();
+        if (archiveDir.isEmpty() || !QDir(archiveDir).exists()) {
+            QMessageBox::warning(this, "تنبيه", "مجلد الأرشيف غير موجود! قم بإنشاء الأرشيف أو اختيار مجلد أرشيف صالح أولاً.");
+            return;
+        }
+
+        stopWabOfflineViewer();
+
+        QString prog;
+        QStringList args;
+        resolveWabEngineCommand("wab-viewer", "wab_viewer", prog, args);
+        args << archiveDir;
+
+        wabViewerProcess = new QProcess(this);
+        connect(wabViewerProcess, &QProcess::readyReadStandardOutput, this, [=]() {
+            if (!wabViewerProcess) return;
+            QString out = QString::fromUtf8(wabViewerProcess->readAllStandardOutput()).trimmed();
+            if (!out.isEmpty()) appendLog("[Viewer] " + out, "OUTPUT");
+        });
+        connect(wabViewerProcess, &QProcess::readyReadStandardError, this, [=]() {
+            if (!wabViewerProcess) return;
+            QString err = QString::fromUtf8(wabViewerProcess->readAllStandardError()).trimmed();
+            if (!err.isEmpty()) appendLog("[Viewer] " + err, "INFO");
+        });
+
+        appendLog("تشغيل عارض المحادثات الأوفلاين: " + prog + " " + args.join(" "), "INFO");
+        wabViewerProcess->start(prog, args);
+
+        waHubStatusLabel->setText("🌐 عارض المحادثات الأوفلاين يعمل الآن على http://127.0.0.1:5000");
+        QTimer::singleShot(1800, this, [=]() {
+            QDesktopServices::openUrl(QUrl("http://127.0.0.1:5000"));
+        });
+    }
+
+    void stopWabOfflineViewer() {
+        if (wabViewerProcess) {
+            if (wabViewerProcess->state() != QProcess::NotRunning) {
+                wabViewerProcess->kill();
+                wabViewerProcess->waitForFinished(1500);
+                appendLog("⏹ تم إيقاف خادم عارض المحادثات الأوفلاين.", "INFO");
+            }
+            wabViewerProcess->deleteLater();
+            wabViewerProcess = nullptr;
+            waHubStatusLabel->setText("● تم إيقاف عارض المحادثات الأوفلاين.");
+        }
+    }  
     
     // ============================================================================
     // الدوال البرمجية لتحويل ملفات .ab واستعادة بيانات الحزم (/data/data/<pkg>)
