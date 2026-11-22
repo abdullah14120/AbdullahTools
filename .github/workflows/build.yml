@@ -19,6 +19,11 @@ jobs:
         version: '6.6.2'
         arch: 'win64_msvc2019_64'
 
+    - name: تجهيز بيئة Python 3.12 لدمج محرك الواتساب
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
     - name: بناء المشروع عبر CMake
       shell: cmd
       run: |
@@ -26,7 +31,7 @@ jobs:
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         cmake --build build --config Release
 
-    - name: تجميع ملفات التشغيل والخطوط العربية وملفات ADB
+    - name: تجميع ملفات التشغيل والخطوط العربية وملفات ADB و Scrcpy
       shell: pwsh
       run: |
         mkdir -Force dist
@@ -72,6 +77,26 @@ jobs:
         Expand-Archive -Path "scrcpy.zip" -DestinationPath "scrcpy_temp" -Force
         New-Item -ItemType Directory -Force -Path "dist/scrcpy"
         Copy-Item -Path "scrcpy_temp/scrcpy-win64-*/*" -Destination "dist/scrcpy" -Recurse -Force
+
+    - name: دمج محرك أرشفة وعرض الواتساب (whatsapp_backup_tools) كملفات EXE مستقلة
+      shell: pwsh
+      run: |
+        $whl = Get-ChildItem -Path "third_party" -Filter "whatsapp_backup_tools-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($whl) {
+            python -m pip install --upgrade pip
+            python -m pip install "$($whl.FullName)" pyinstaller
+            New-Item -ItemType Directory -Force -Path "dist/wab_engine"
+
+            Set-Content -Path "run_wab_archiver.py" -Value 'import runpy; runpy.run_module("wab_archiver", run_name="__main__")' -Encoding UTF8
+            Set-Content -Path "run_wab_viewer.py" -Value 'import runpy; runpy.run_module("wab_viewer", run_name="__main__")' -Encoding UTF8
+
+            pyinstaller --onefile --console --name wab-archiver --distpath dist/wab_engine --hidden-import wab_archiver.__main__ --hidden-import wab_archiver.main --collect-all wab_archiver --collect-all shared run_wab_archiver.py
+            pyinstaller --onefile --console --name wab-viewer --distpath dist/wab_engine --hidden-import wab_viewer.__main__ --hidden-import wab_viewer.main --collect-all wab_viewer --collect-all shared run_wab_viewer.py
+
+            Write-Host "✔ تم دمج محرك wab-archiver و wab-viewer داخل dist/wab_engine بنجاح!"
+        } else {
+            Write-Host "ملاحظة: لم يتم العثور على ملف .whl في third_party/ - ستعتمد الأداة على Python المثبت محلياً إن توفر."
+        }
 
     - name: رفع الأداة الجاهزة للتحميل
       uses: actions/upload-artifact@v4
